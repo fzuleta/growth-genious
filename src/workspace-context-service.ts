@@ -2,12 +2,9 @@ import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
 import { readAgentContextDocuments } from "./context-service";
-import { getGameAssetsDir, resolveModelIdByThemeName } from "./helpers/game-assets";
 
 const WORKSPACE_ROOT = process.cwd();
-const GAME_ASSETS_DIR = getGameAssetsDir();
-const TOP_LEVEL_DOCS = ["README.md", "fb-ig-tokengen.md"];
-const MODEL_DEFAULT_FILES = ["game.json", "art-style.md"];
+const TOP_LEVEL_DOCS = ["README.md", "workspace-template/context.md"];
 const MAX_SNIPPET_LENGTH = 1600;
 
 export async function retrieveWorkspaceRouteEvidence(input: {
@@ -32,15 +29,10 @@ export async function retrieveWorkspaceRouteEvidence(input: {
 		});
 	}
 
-	const modelId = input.decision.entityHints.modelId
-		?? extractModelId(input.content)
-		?? await resolveModelIdByThemeName(GAME_ASSETS_DIR, input.content).catch(() => undefined);
-	if (modelId) {
-		const modelSnippets = await loadModelDocumentSnippets(modelId, input.decision.entityHints.fileHint);
-		if (modelSnippets.length > 0) {
-			summaryParts.push(`Loaded ${modelSnippets.length} game-assets document${modelSnippets.length === 1 ? "" : "s"} for ${modelId}.`);
-			snippets.push(...modelSnippets);
-		}
+	const requestedFileSnippets = await loadRequestedFileSnippets(input.decision.entityHints.fileHint);
+	if (requestedFileSnippets.length > 0) {
+		summaryParts.push(`Loaded ${requestedFileSnippets.length} requested workspace file${requestedFileSnippets.length === 1 ? "" : "s"}.`);
+		snippets.push(...requestedFileSnippets);
 	}
 
 	const topLevelDocSnippets = await loadTopLevelDocSnippets(input.decision.entityHints.fileHint);
@@ -57,13 +49,24 @@ export async function retrieveWorkspaceRouteEvidence(input: {
 	};
 }
 
-async function loadModelDocumentSnippets(modelId: string, fileHint?: string): Promise<ChatRouteEvidence["snippets"]> {
-	const modelDir = path.join(GAME_ASSETS_DIR, modelId);
-	const candidateFiles = uniqueStrings(fileHint ? [fileHint, ...MODEL_DEFAULT_FILES] : MODEL_DEFAULT_FILES);
+async function loadRequestedFileSnippets(fileHint?: string): Promise<ChatRouteEvidence["snippets"]> {
+	if (!fileHint) {
+		return [];
+	}
+
+	const normalizedHint = fileHint.trim();
+	if (!normalizedHint) {
+		return [];
+	}
+
+	const candidatePaths = uniqueStrings([
+		normalizedHint,
+		normalizedHint.startsWith("src/") ? normalizedHint : path.join("src", normalizedHint),
+	]);
 	const snippets: ChatRouteEvidence["snippets"] = [];
 
-	for (const fileName of candidateFiles) {
-		const filePath = path.join(modelDir, fileName);
+	for (const candidate of candidatePaths) {
+		const filePath = path.join(WORKSPACE_ROOT, candidate);
 		if (!(await fileExists(filePath))) {
 			continue;
 		}
@@ -74,35 +77,15 @@ async function loadModelDocumentSnippets(modelId: string, fileHint?: string): Pr
 		}
 
 		snippets.push({
-			label: `${modelId}/${fileName}`,
+			label: relativeWorkspacePath(filePath),
 			content: truncate(content),
 			sourceType: "workspace",
 			sourcePath: relativeWorkspacePath(filePath),
 		});
-	}
 
-	if (snippets.length > 0) {
-		return snippets;
-	}
-
-	const entries = await readdir(modelDir, { withFileTypes: true }).catch((): Array<{ isFile: () => boolean; name: string }> => []);
-	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md") || snippets.length >= 2) {
-			continue;
+		if (snippets.length >= 2) {
+			break;
 		}
-
-		const filePath = path.join(modelDir, entry.name);
-		const content = (await readFile(filePath, "utf8")).trim();
-		if (!content) {
-			continue;
-		}
-
-		snippets.push({
-			label: `${modelId}/${entry.name}`,
-			content: truncate(content),
-			sourceType: "workspace",
-			sourcePath: relativeWorkspacePath(filePath),
-		});
 	}
 
 	return snippets;
@@ -154,12 +137,6 @@ function truncate(text: string): string {
 function relativeWorkspacePath(filePath: string): string {
 	return path.relative(WORKSPACE_ROOT, filePath) || path.basename(filePath);
 }
-
-function extractModelId(content: string): string | undefined {
-	const match = content.match(/\bff\d{3}-[a-z0-9-]+\b/i);
-	return match ? match[0].toLowerCase() : undefined;
-}
-
 function uniqueStrings(values: string[]): string[] {
 	return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
 }

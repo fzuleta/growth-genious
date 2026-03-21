@@ -173,7 +173,7 @@ export async function buildAndRestart(
 }
 
 export async function triggerVeilRestart(): Promise<string> {
-	const result = await runShellCommand("tsx", [path.join(WORKSPACE_ROOT, "src", "veil.ts"), "restart"]);
+	const result = await runShellCommand("tsx", [path.join(WORKSPACE_ROOT, "src", "growth.ts"), "restart"]);
 	if (!result.success) {
 		throw new Error(result.output || "veil restart failed");
 	}
@@ -361,14 +361,14 @@ function buildPlanningSystemPrompt(
 				{
 					type: "input_text",
 					text: [
-						"You are an expert coding agent that modifies the social-media-script codebase.",
+						"You are an expert coding agent that modifies the growth-genious codebase.",
 						"Your task is to explore the repository and produce a detailed implementation plan.",
 						"Use the provided tools to read files, list directories, and search the codebase.",
 						"When you have enough understanding, call submit_plan with a detailed markdown plan.",
 						"The plan must include: what files to create/modify, what changes to make, and why.",
 						"Be thorough in your exploration — understand existing patterns before proposing changes.",
 						"The workspace root is a TypeScript project using tsx for development and tsc for builds.",
-						"Key directories: src/ (source), game-assets/ (model data), agent/ (context docs), output/ (generated).",
+						"Key directories: src/ (source), workspace-template/ (workspace guidance), and top-level docs such as README.md.",
 						"Do not make any changes yet — this is the planning phase only.",
 					].join(" "),
 				},

@@ -69,9 +69,9 @@ export async function retrieveDbRouteEvidence(input: {
 	}
 
 	if (latestJobContext.latestCommand || latestJobContext.latestJobUpdate) {
-		summaryParts.push("Loaded the latest createpost command/job update context from chat history.");
+		summaryParts.push("Loaded the latest recorded command/job update context from chat history.");
 		snippets.push({
-			label: "Latest createpost job context",
+			label: "Latest recorded job context",
 			content: truncate(formatLatestJobContext(latestJobContext)),
 			sourceType: "db",
 		});

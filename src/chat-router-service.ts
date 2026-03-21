@@ -1,10 +1,7 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import type { ChatRouteDecision } from "./chat-routing-types";
-import { getGameAssetsDir, listModelIds, resolveModelIdByThemeName } from "./helpers/game-assets";
 import { logWarn } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
-
-const GAME_ASSETS_DIR = getGameAssetsDir();
 
 const DEFAULT_ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
 const DIRECT_CONVERSATION_MAX_LENGTH = 24;
@@ -82,12 +79,6 @@ async function buildChatRoutePromptInput(input: {
 	username: string;
 	content: string;
 }): Promise<ResponseInputItem[]> {
-	let modelListHint = "";
-	try {
-		const modelIds = await listModelIds(GAME_ASSETS_DIR);
-		modelListHint = ` Available game-assets model IDs: ${modelIds.join(", ")}. When the user refers to a theme by name (e.g. \"viking\", \"egypt\"), set entityHints.modelId to the matching model ID.`;
-	} catch { /* ignore – classifier still works without list */ }
-
 	return [
 		{
 			role: "system",
@@ -99,14 +90,13 @@ async function buildChatRoutePromptInput(input: {
 						"Return strict JSON only with keys route, confidence, subject, requestedSources, entityHints, reason.",
 						"Allowed route values: conversation, db-query, workspace-question, self-modify, code-analysis.",
 						"Use db-query whenever the answer likely depends on MongoDB-backed history, jobs, prior chat, memory, prior bot actions, user-specific history, or anything about what happened before.",
-						"Use workspace-question for repository docs, game-assets, art style, sound instructions, logos, or model metadata.",
+						"Use workspace-question for repository docs, workspace templates, configuration, source tree layout, or other repository facts that need retrieval.",
 						"Use code-analysis when the user wants you to inspect source code, review an implementation, analyze a file, or provide recommendations without modifying code.",
-						"Use self-modify when the user is asking the bot to write code, implement features, fix bugs, refactor source files, add post types, or make any change to the codebase itself.",
+						"Use self-modify when the user is asking the bot to write code, implement features, fix bugs, refactor source files, add plugin support, or make any change to the codebase itself.",
 						"Use conversation for general chat, brainstorming, or anything not requiring retrieval or code changes.",
 						"For db-query, prefer broad retrieval when uncertain rather than falling back too early.",
 						"entityHints must be an object with optional jobId, optional modelId, optional fileHint, optional selfModifyIntent (brief description of the requested code change), and topicKeywords as an array of short strings.",
 						"Do not answer the user. Do not include markdown. Keep subject short and concrete.",
-					modelListHint,
 				].filter(Boolean).join(" "),
 				},
 			],
@@ -129,36 +119,9 @@ async function buildChatRoutePromptInput(input: {
 
 async function enrichDecisionWithThemeResolver(
 	decision: ChatRouteDecision,
-	content: string,
+	_content: string,
 ): Promise<ChatRouteDecision> {
-	if (decision.entityHints.modelId) {
-		return decision;
-	}
-
-	try {
-		const resolvedModelId = await resolveModelIdByThemeName(GAME_ASSETS_DIR, content);
-		if (!resolvedModelId) {
-			return decision;
-		}
-
-		const enrichedDecision = { ...decision };
-		enrichedDecision.entityHints = {
-			...decision.entityHints,
-			modelId: resolvedModelId,
-		};
-
-		// If the route was conversation but we matched a model, upgrade to workspace-question
-		if (decision.route === "conversation") {
-			enrichedDecision.route = "workspace-question";
-			enrichedDecision.subject = "game-assets-model";
-			enrichedDecision.requestedSources = ["game-assets"];
-			enrichedDecision.reason = `${decision.reason ?? "unknown"}+theme-resolved`;
-		}
-
-		return enrichedDecision;
-	} catch {
-		return decision;
-	}
+	return decision;
 }
 
 function classifyWithHeuristics(content: string): ChatRouteDecision | null {
@@ -172,7 +135,7 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 			/(analy[sz]e|review|inspect|look at|recommendations|recommend improvements|code review|feedback on|what do you think of|assess)/i.test(content) ||
 			(/(suggest|idea|variation|complement|complementary)/i.test(content) && /(based on|using|from)/i.test(content))
 		) &&
-		/(src\/|\.ts\b|implementation|post-type|post type|post-types|function|class|file|directory|folder)/i.test(content)
+		/(src\/|\.ts\b|implementation|plugin|function|class|file|directory|folder)/i.test(content)
 	) {
 		return {
 			route: "code-analysis",
@@ -187,7 +150,7 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 		};
 	}
 
-	if (/(implement|add feature|create a new|refactor|fix bug|modify code|change the code|update the code|add a new post.?type|write code|edit the source|patch the|add support for)/i.test(content)) {
+	if (/(implement|add feature|create a new|refactor|fix bug|modify code|change the code|update the code|write code|edit the source|patch the|add support for|plugin system)/i.test(content)) {
 		return {
 			route: "self-modify",
 			confidence: "high",
@@ -201,7 +164,6 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 		};
 	}
 
-	const modelId = extractModelId(content);
 	if (/(what happened|last job|previous job|job status|job id|run id|failed job|latest job)/i.test(content)) {
 		return {
 			route: "db-query",
@@ -209,7 +171,6 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 			subject: "recent-job",
 			requestedSources: ["generation-jobs"],
 			entityHints: {
-				modelId: modelId ?? undefined,
 				topicKeywords: buildTopicKeywords(content),
 			},
 			reason: "job-keyword-match",
@@ -229,14 +190,13 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 		};
 	}
 
-	if (modelId || /(game-assets|art style|sound instructions|logo|game\.json|readme|repo docs|documentation|workspace)/i.test(content)) {
+	if (/(readme|repo docs|documentation|workspace|workspace-template|context\.md|project structure|folder structure|plugin)/i.test(content)) {
 		return {
 			route: "workspace-question",
-			confidence: modelId ? "high" : "medium",
-			subject: modelId ? "game-assets-model" : "workspace-docs",
-			requestedSources: modelId ? ["game-assets"] : ["agent-docs", "top-level-docs"],
+			confidence: "medium",
+			subject: "workspace-docs",
+			requestedSources: ["agent-docs", "top-level-docs", "workspace-template"],
 			entityHints: {
-				modelId: modelId ?? undefined,
 				fileHint: inferFileHint(content),
 				topicKeywords: buildTopicKeywords(content),
 			},

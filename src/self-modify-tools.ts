@@ -33,7 +33,7 @@ export const PLANNING_TOOLS: Tool[] = [
 	fnTool("list_dir", "List contents of a directory. Returns file and folder names (folders end with /).", {
 		type: "object",
 		properties: {
-			path: { type: "string", description: "Relative path from workspace root (e.g. src/post-types)" },
+			path: { type: "string", description: "Relative path from workspace root (e.g. src/plugins)" },
 		},
 		required: ["path"],
 	}),
@@ -59,7 +59,7 @@ export const ANALYSIS_TOOLS: Tool[] = [
 	fnTool("read_file", "Read the contents of a file in the workspace. Returns the text content. Use startLine/endLine for large files.", {
 		type: "object",
 		properties: {
-			path: { type: "string", description: "Relative path from workspace root (e.g. src/post-types/character-with-scenery.ts)" },
+			path: { type: "string", description: "Relative path from workspace root (e.g. src/plugins/filesystem.ts)" },
 			startLine: { type: "number", description: "1-based start line (optional)" },
 			endLine: { type: "number", description: "1-based end line (optional)" },
 		},

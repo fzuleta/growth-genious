@@ -1,7 +1,0 @@
-{
-  "watch": ["src", "game-assets"],
-  "ext": "ts,md,json",
-  "exec": "tsx src/index.ts",
-  "signal": "SIGTERM",
-  "delay": "300"
-}
