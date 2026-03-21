@@ -1,10 +1,11 @@
 # Growth Genious
 
-Discord-based workspace assistant for repository Q&A, code analysis, memory-backed chat, and controlled self-modification.
+Discord-based workspace assistant for repository Q&A, code analysis, memory-backed chat, controlled self-modification, and contract-defined custom routing.
 
 ## What remains in this repo
 
 - `src/bot.ts`: Discord bot entrypoint
+- `src/bot-contract.ts`: runtime contract for bot name, bot key, and custom route callback
 - `src/chat-service.ts`: grounded chat prompt assembly and reply generation
 - `src/chat-router-service.ts`: route classification for conversation, DB lookup, workspace retrieval, code analysis, and self-modify
 - `src/chat-db-query-service.ts`: evidence retrieval from MongoDB-backed history and memory
@@ -48,6 +49,31 @@ Current bot behavior:
 - Maintains short-term and long-term memory summaries.
 - Supports a restricted self-modify flow for the authorized user.
 - Supports read-only code analysis requests for the authorized user.
+- Can short-circuit the default router through the contract-defined `routeCustomRequest(...)` callback.
+
+## Bot contract
+
+The active runtime contract lives in `src/bot-contract.ts`.
+
+Current required fields:
+
+- `name`: assistant identity used by the bot and prompts
+- `discordBotKey`: bot token, currently sourced from `DISCORD_BOT_KEY`
+- `routeCustomRequest(input)`: callback invoked before the default router heuristics/LLM classifier; return `null` to continue normal routing or return a custom handler to take over the request
+
+Current contract shape:
+
+```ts
+export interface BotContract {
+	name: string;
+	discordBotKey: string;
+	routeCustomRequest: (input: {
+		content: string;
+		channelId: string;
+		username: string;
+	}) => Promise<CustomRouteMatch | null> | CustomRouteMatch | null;
+}
+```
 
 ## Required env
 

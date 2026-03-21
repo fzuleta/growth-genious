@@ -1,4 +1,5 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
+import type { BotContract, CustomRouteHandler, CustomRouteMatch } from "./bot-contract";
 import type { ChatRouteDecision } from "./chat-routing-types";
 import { logWarn } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
@@ -10,12 +11,14 @@ export interface ChatRouteClassificationResult {
 	decision: ChatRouteDecision;
 	model: string;
 	promptInput: ResponseInputItem[];
+	customRouteHandler: CustomRouteHandler | null;
 }
 
 export async function classifyChatRoute(input: {
 	content: string;
 	channelId: string;
 	username: string;
+	contract?: BotContract;
 }): Promise<ChatRouteClassificationResult> {
 	const normalizedContent = input.content.trim();
 	const promptInput = await buildChatRoutePromptInput({
@@ -29,6 +32,21 @@ export async function classifyChatRoute(input: {
 			decision: buildFallbackDecision("conversation", normalizedContent, "empty-content"),
 			model: DEFAULT_ROUTER_MODEL,
 			promptInput,
+			customRouteHandler: null,
+		};
+	}
+
+	const customRouteMatch = await resolveCustomRouteMatch(input.contract, {
+		content: normalizedContent,
+		channelId: input.channelId,
+		username: input.username,
+	});
+	if (customRouteMatch) {
+		return {
+			decision: buildCustomRouteDecision(customRouteMatch, normalizedContent),
+			model: DEFAULT_ROUTER_MODEL,
+			promptInput,
+			customRouteHandler: customRouteMatch.handle,
 		};
 	}
 
@@ -39,6 +57,7 @@ export async function classifyChatRoute(input: {
 			decision: enriched,
 			model: DEFAULT_ROUTER_MODEL,
 			promptInput,
+			customRouteHandler: null,
 		};
 	}
 
@@ -55,6 +74,7 @@ export async function classifyChatRoute(input: {
 			decision: enriched,
 			model: DEFAULT_ROUTER_MODEL,
 			promptInput,
+			customRouteHandler: null,
 		};
 	} catch (error: unknown) {
 		logWarn("Chat route classification failed; falling back to conversation", {
@@ -66,6 +86,7 @@ export async function classifyChatRoute(input: {
 			decision: buildFallbackDecision("conversation", normalizedContent, "classifier-error"),
 			model: DEFAULT_ROUTER_MODEL,
 			promptInput,
+			customRouteHandler: null,
 		};
 	}
 }
@@ -122,6 +143,30 @@ async function enrichDecisionWithThemeResolver(
 	_content: string,
 ): Promise<ChatRouteDecision> {
 	return decision;
+}
+
+async function resolveCustomRouteMatch(
+	contract: BotContract | undefined,
+	input: {
+		content: string;
+		channelId: string;
+		username: string;
+	},
+): Promise<CustomRouteMatch | null> {
+	if (!contract) {
+		return null;
+	}
+
+	try {
+		return (await contract.routeCustomRequest(input)) ?? null;
+	} catch (error: unknown) {
+		logWarn("Custom route callback failed; continuing with default router", {
+			channelId: input.channelId,
+			username: input.username,
+			message: error instanceof Error ? error.message : String(error),
+		});
+		return null;
+	}
 }
 
 function classifyWithHeuristics(content: string): ChatRouteDecision | null {
@@ -207,6 +252,23 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 	return null;
 }
 
+function buildCustomRouteDecision(match: CustomRouteMatch, content: string): ChatRouteDecision {
+	return {
+		route: "custom",
+		confidence: match.confidence ?? "high",
+		subject: match.subject.trim(),
+		requestedSources: Array.isArray(match.requestedSources)
+			? match.requestedSources.filter((value) => value.trim().length > 0).slice(0, 5)
+			: [],
+		entityHints: {
+			fileHint: inferFileHint(content),
+			customCommandName: match.commandName?.trim() || undefined,
+			topicKeywords: buildTopicKeywords(content),
+		},
+		reason: match.reason?.trim() || "custom-route-callback",
+	};
+}
+
 function parseClassifierOutput(outputText: string, fallbackContent: string): ChatRouteDecision {
 	const jsonText = stripJsonCodeFence(outputText.trim());
 
@@ -215,7 +277,7 @@ function parseClassifierOutput(outputText: string, fallbackContent: string): Cha
 			entityHints?: Partial<ChatRouteDecision["entityHints"]>;
 		};
 		const route =
-			parsed.route === "db-query" || parsed.route === "workspace-question" || parsed.route === "conversation" || parsed.route === "self-modify" || parsed.route === "code-analysis"
+			parsed.route === "db-query" || parsed.route === "workspace-question" || parsed.route === "conversation" || parsed.route === "self-modify" || parsed.route === "code-analysis" || parsed.route === "custom"
 				? parsed.route
 				: "conversation";
 		const confidence =
@@ -250,6 +312,10 @@ function parseClassifierOutput(outputText: string, fallbackContent: string): Cha
 					typeof parsed.entityHints?.fileHint === "string"
 						? parsed.entityHints.fileHint.trim()
 						: inferFileHint(fallbackContent),
+				customCommandName:
+					typeof parsed.entityHints?.customCommandName === "string"
+						? parsed.entityHints.customCommandName.trim()
+						: undefined,
 				topicKeywords,
 				selfModifyIntent:
 					typeof parsed.entityHints?.selfModifyIntent === "string"

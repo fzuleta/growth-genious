@@ -1,4 +1,4 @@
-export type ChatRoute = "conversation" | "db-query" | "workspace-question" | "self-modify" | "code-analysis";
+export type ChatRoute = "conversation" | "db-query" | "workspace-question" | "self-modify" | "code-analysis" | "custom";
 
 export type ChatRouteConfidence = "low" | "medium" | "high";
 
@@ -11,6 +11,7 @@ export interface ChatRouteDecision {
 		jobId?: string;
 		modelId?: string;
 		fileHint?: string;
+		customCommandName?: string;
 		topicKeywords: string[];
 		selfModifyIntent?: string;
 	};

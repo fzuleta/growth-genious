@@ -22,6 +22,7 @@ const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
 
 export interface GenerateChatReplyInput {
 	database: SmediaMongoDatabase;
+	assistantName: string;
 	guildId: string;
 	channelId: string;
 	userId: string;
@@ -83,6 +84,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	});
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const promptInput = buildChatPrompt({
+		assistantName: input.assistantName,
 		channelId: input.channelId,
 		contextMarkdown,
 		memorySnapshot,
@@ -157,6 +159,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 }
 
 function buildChatPrompt(input: {
+	assistantName: string;
 	channelId: string;
 	contextMarkdown: string | null;
 	memorySnapshot: ChatMemorySnapshot;
@@ -179,7 +182,7 @@ function buildChatPrompt(input: {
 				{
 					type: "input_text",
 					text: [
-						"You are the Discord assistant for the growth-genious workspace.",
+						`You are the Discord assistant for ${input.assistantName}.`,
 						"Treat every non-command message in the channel as a direct request to you.",
 						"Answer directly and concisely.",
 						"Be useful for repository operations, architecture questions, plugin design, self-modify workflows, and workspace-related questions.",

@@ -6,6 +6,7 @@ import {
 	GatewayIntentBits,
 	type Message,
 } from "discord.js";
+import { botContract } from "./bot-contract";
 import { generateChatReply } from "./chat-service";
 import { retrieveDbRouteEvidence } from "./chat-db-query-service";
 import { classifyChatRoute } from "./chat-router-service";
@@ -42,11 +43,6 @@ const DISCORD_MESSAGE_LIMIT = 2000;
 const CHAT_DEBOUNCE_MS = 1500;
 const MEMORY_CONSOLIDATION_INTERVAL_MS = 10 * 60 * 1000;
 
-const botKey = process.env.DISCORD_BOT_KEY?.trim();
-if (!botKey) {
-	throw new Error("Missing DISCORD_BOT_KEY. The Discord bot cannot start without it.");
-}
-
 const commandUserId = process.env.DISCORD_FELI_ID?.trim();
 if (!commandUserId) {
 	throw new Error("Missing DISCORD_FELI_ID. Bot commands are restricted and require this user ID.");
@@ -75,6 +71,7 @@ const client = new Client({
 
 client.once("ready", () => {
 	logInfo("Discord workspace assistant connected", {
+		assistantName: botContract.name,
 		botUser: client.user?.tag ?? null,
 		allowedChannelIds: Array.from(allowedChannelIds),
 		commandUserId,
@@ -234,8 +231,10 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			content: combinedContent,
 			channelId: lastMessage.channelId,
 			username: lastMessage.author.username,
+			contract: botContract,
 		});
 		const routeDecision = classification.decision;
+		const customRouteHandler = classification.customRouteHandler;
 
 		if (readBooleanEnv(process.env.DEBUG_FREETALK_OPENAI_INPUTS)) {
 			await persistRouterOpenAiDebugInput({
@@ -290,6 +289,20 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			return;
 		}
 
+		if (routeDecision.route === "custom" && customRouteHandler) {
+			await persistInboundChatContent(database, lastMessage, combinedContent);
+			const customReply = await customRouteHandler({
+				assistantName: botContract.name,
+				database,
+				message: lastMessage,
+				content: combinedContent,
+			});
+			if (customReply.trim().length > 0) {
+				await replyToMessage(database, lastMessage, customReply, "chat");
+			}
+			return;
+		}
+
 		// If self-modify was routed but user is not authorized, downgrade to conversation
 		if (routeDecision.route === "self-modify" || routeDecision.route === "code-analysis") {
 			routeDecision.route = "conversation";
@@ -298,6 +311,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 
 		const reply = await generateChatReply({
 			database,
+			assistantName: botContract.name,
 			guildId: lastMessage.guildId!,
 			channelId: lastMessage.channelId,
 			userId: lastMessage.author.id,
@@ -609,7 +623,7 @@ async function startBot(): Promise<void> {
 			void shutdownBot("SIGUSR2");
 		});
 
-		await client.login(botKey);
+		await client.login(botContract.discordBotKey);
 
 		// After login, check for sessions that were mid-restart
 		if (mongoDatabase) {
@@ -875,8 +889,9 @@ async function persistOutboundDiscordMessage(
 async function formatBotStatus(database: SmediaMongoDatabase, channelId: string): Promise<string> {
 	const activeSession = await getActiveSelfModifySession(database, channelId);
 	const lines = [
-		"Bot is online.",
+		`${botContract.name} is online.`,
 		`memoryConsolidation=${memoryConsolidationPromise ? "running" : "idle"}`,
+		"customRouter=installed",
 	];
 
 	if (activeSession) {
