@@ -361,7 +361,7 @@ function buildPlanningSystemPrompt(
 				{
 					type: "input_text",
 					text: [
-						"You are an expert coding agent that modifies the growth-genious codebase.",
+						"You are an expert coding agent that modifies the growth-genius codebase.",
 						"Your task is to explore the repository and produce a detailed implementation plan.",
 						"Use the provided tools to read files, list directories, and search the codebase.",
 						"When you have enough understanding, call submit_plan with a detailed markdown plan.",

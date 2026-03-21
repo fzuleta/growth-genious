@@ -1,13 +1,16 @@
 import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import type { PluginContract } from "./plugin-contract";
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
 import { readAgentContextDocuments } from "./context-service";
 
 const WORKSPACE_ROOT = process.cwd();
 const TOP_LEVEL_DOCS = ["README.md", "workspace-template/context.md"];
+const APP_DOCS = ["README.md"];
 const MAX_SNIPPET_LENGTH = 1600;
 
 export async function retrieveWorkspaceRouteEvidence(input: {
+	plugin?: PluginContract;
 	decision: ChatRouteDecision;
 	content: string;
 }): Promise<ChatRouteEvidence> {
@@ -29,10 +32,16 @@ export async function retrieveWorkspaceRouteEvidence(input: {
 		});
 	}
 
-	const requestedFileSnippets = await loadRequestedFileSnippets(input.decision.entityHints.fileHint);
+	const requestedFileSnippets = await loadRequestedFileSnippets(input.plugin, input.decision.entityHints.fileHint);
 	if (requestedFileSnippets.length > 0) {
 		summaryParts.push(`Loaded ${requestedFileSnippets.length} requested workspace file${requestedFileSnippets.length === 1 ? "" : "s"}.`);
 		snippets.push(...requestedFileSnippets);
+	}
+
+	const appDocSnippets = await loadPluginDocSnippets(input.plugin);
+	if (appDocSnippets.length > 0) {
+		summaryParts.push(`Loaded ${appDocSnippets.length} app documentation file${appDocSnippets.length === 1 ? "" : "s"}.`);
+		snippets.push(...appDocSnippets);
 	}
 
 	const topLevelDocSnippets = await loadTopLevelDocSnippets(input.decision.entityHints.fileHint);
@@ -49,7 +58,7 @@ export async function retrieveWorkspaceRouteEvidence(input: {
 	};
 }
 
-async function loadRequestedFileSnippets(fileHint?: string): Promise<ChatRouteEvidence["snippets"]> {
+async function loadRequestedFileSnippets(plugin: PluginContract | undefined, fileHint?: string): Promise<ChatRouteEvidence["snippets"]> {
 	if (!fileHint) {
 		return [];
 	}
@@ -60,6 +69,8 @@ async function loadRequestedFileSnippets(fileHint?: string): Promise<ChatRouteEv
 	}
 
 	const candidatePaths = uniqueStrings([
+		plugin ? path.join(plugin.rootDir, normalizedHint) : "",
+		plugin && normalizedHint.startsWith("src/") ? "" : path.join(plugin?.rootDir ?? "", normalizedHint),
 		normalizedHint,
 		normalizedHint.startsWith("src/") ? normalizedHint : path.join("src", normalizedHint),
 	]);
@@ -86,6 +97,34 @@ async function loadRequestedFileSnippets(fileHint?: string): Promise<ChatRouteEv
 		if (snippets.length >= 2) {
 			break;
 		}
+	}
+
+	return snippets;
+}
+
+async function loadPluginDocSnippets(plugin?: PluginContract): Promise<ChatRouteEvidence["snippets"]> {
+	if (!plugin) {
+		return [];
+	}
+
+	const snippets: ChatRouteEvidence["snippets"] = [];
+	for (const fileName of APP_DOCS) {
+		const filePath = path.join(WORKSPACE_ROOT, plugin.rootDir, fileName);
+		if (!(await fileExists(filePath))) {
+			continue;
+		}
+
+		const content = (await readFile(filePath, "utf8")).trim();
+		if (!content) {
+			continue;
+		}
+
+		snippets.push({
+			label: relativeWorkspacePath(filePath),
+			content: truncate(content),
+			sourceType: "workspace",
+			sourcePath: relativeWorkspacePath(filePath),
+		});
 	}
 
 	return snippets;

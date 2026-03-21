@@ -1,12 +1,14 @@
-import dotenv from "dotenv";
-dotenv.config();
+import { loadRuntimeEnv } from "./runtime-env";
+
+const runtimeEnv = loadRuntimeEnv();
 
 import {
 	Client,
 	GatewayIntentBits,
 	type Message,
 } from "discord.js";
-import { botContract } from "./bot-contract";
+import { loadCurrentPlugin, listAvailablePlugins } from "./plugin-loader";
+import { getMissingEnvVars } from "./plugin-contract";
 import { generateChatReply } from "./chat-service";
 import { retrieveDbRouteEvidence } from "./chat-db-query-service";
 import { classifyChatRoute } from "./chat-router-service";
@@ -36,6 +38,9 @@ import {
 	triggerVeilRestart,
 	checkPostRestartSessions,
 } from "./self-modify-service";
+
+const currentPlugin = loadCurrentPlugin();
+const availablePlugins = listAvailablePlugins();
 const STATUS_COMMAND_PREFIX = "/status";
 const MEMORY_REFRESH_COMMAND_PREFIX = "/refreshmemory";
 const MEMORY_INSPECT_COMMAND_PREFIX = "/memory";
@@ -71,7 +76,11 @@ const client = new Client({
 
 client.once("ready", () => {
 	logInfo("Discord workspace assistant connected", {
-		assistantName: botContract.name,
+		pluginId: currentPlugin.id,
+		assistantName: currentPlugin.name,
+		pluginEnvFilePath: currentPlugin.envFilePath,
+		pluginEnvLoaded: runtimeEnv.pluginEnvLoaded,
+		enabledPlugins: availablePlugins.map((plugin) => plugin.id),
 		botUser: client.user?.tag ?? null,
 		allowedChannelIds: Array.from(allowedChannelIds),
 		commandUserId,
@@ -231,7 +240,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			content: combinedContent,
 			channelId: lastMessage.channelId,
 			username: lastMessage.author.username,
-			contract: botContract,
+			plugin: currentPlugin,
 		});
 		const routeDecision = classification.decision;
 		const customRouteHandler = classification.customRouteHandler;
@@ -262,6 +271,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			})
 			: routeDecision.route === "workspace-question"
 				? await retrieveWorkspaceRouteEvidence({
+					plugin: currentPlugin,
 					decision: routeDecision,
 					content: combinedContent,
 				})
@@ -292,10 +302,13 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		if (routeDecision.route === "custom" && customRouteHandler) {
 			await persistInboundChatContent(database, lastMessage, combinedContent);
 			const customReply = await customRouteHandler({
-				assistantName: botContract.name,
+				plugin: currentPlugin,
 				database,
 				message: lastMessage,
 				content: combinedContent,
+				args: "",
+				pluginRootDir: currentPlugin.rootDir,
+				outputDir: currentPlugin.outputDir,
 			});
 			if (customReply.trim().length > 0) {
 				await replyToMessage(database, lastMessage, customReply, "chat");
@@ -311,7 +324,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 
 		const reply = await generateChatReply({
 			database,
-			assistantName: botContract.name,
+			assistantName: currentPlugin.name,
 			guildId: lastMessage.guildId!,
 			channelId: lastMessage.channelId,
 			userId: lastMessage.author.id,
@@ -623,7 +636,7 @@ async function startBot(): Promise<void> {
 			void shutdownBot("SIGUSR2");
 		});
 
-		await client.login(botContract.discordBotKey);
+		await client.login(currentPlugin.discordBotKey);
 
 		// After login, check for sessions that were mid-restart
 		if (mongoDatabase) {
@@ -888,10 +901,18 @@ async function persistOutboundDiscordMessage(
 
 async function formatBotStatus(database: SmediaMongoDatabase, channelId: string): Promise<string> {
 	const activeSession = await getActiveSelfModifySession(database, channelId);
+	const missingPluginEnv = getMissingEnvVars(currentPlugin.requiredEnv);
 	const lines = [
-		`${botContract.name} is online.`,
+		`${currentPlugin.name} is online.`,
+		`pluginId=${currentPlugin.id}`,
+		`pluginEnvFile=${currentPlugin.envFilePath}`,
+		`pluginEnvLoaded=${runtimeEnv.pluginEnvLoaded}`,
+		`pluginRoot=${currentPlugin.rootDir}`,
+		`outputDir=${currentPlugin.outputDir}`,
+		`pluginEnv=${missingPluginEnv.length === 0 ? "ready" : `missing:${missingPluginEnv.join(",")}`}`,
 		`memoryConsolidation=${memoryConsolidationPromise ? "running" : "idle"}`,
-		"customRouter=installed",
+		`enabledPlugins=${availablePlugins.map((plugin) => plugin.id).join(",")}`,
+		`pluginCommands=${currentPlugin.commands.map((command) => `/${command.name}`).join(",")}`,
 	];
 
 	if (activeSession) {

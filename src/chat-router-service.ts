@@ -1,8 +1,9 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
-import type { BotContract, CustomRouteHandler, CustomRouteMatch } from "./bot-contract";
+import type { PluginContract, PluginRouteHandler, PluginRouteMatch } from "./plugin-contract";
 import type { ChatRouteDecision } from "./chat-routing-types";
 import { logWarn } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
+import { resolvePluginRouteMatch } from "./plugin-contract";
 
 const DEFAULT_ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
 const DIRECT_CONVERSATION_MAX_LENGTH = 24;
@@ -11,14 +12,14 @@ export interface ChatRouteClassificationResult {
 	decision: ChatRouteDecision;
 	model: string;
 	promptInput: ResponseInputItem[];
-	customRouteHandler: CustomRouteHandler | null;
+	customRouteHandler: PluginRouteHandler | null;
 }
 
 export async function classifyChatRoute(input: {
 	content: string;
 	channelId: string;
 	username: string;
-	contract?: BotContract;
+	plugin?: PluginContract;
 }): Promise<ChatRouteClassificationResult> {
 	const normalizedContent = input.content.trim();
 	const promptInput = await buildChatRoutePromptInput({
@@ -36,7 +37,7 @@ export async function classifyChatRoute(input: {
 		};
 	}
 
-	const customRouteMatch = await resolveCustomRouteMatch(input.contract, {
+	const customRouteMatch = await resolveCustomRouteMatch(input.plugin, {
 		content: normalizedContent,
 		channelId: input.channelId,
 		username: input.username,
@@ -146,19 +147,24 @@ async function enrichDecisionWithThemeResolver(
 }
 
 async function resolveCustomRouteMatch(
-	contract: BotContract | undefined,
+	plugin: PluginContract | undefined,
 	input: {
 		content: string;
 		channelId: string;
 		username: string;
 	},
-): Promise<CustomRouteMatch | null> {
-	if (!contract) {
+): Promise<PluginRouteMatch | null> {
+	if (!plugin) {
 		return null;
 	}
 
 	try {
-		return (await contract.routeCustomRequest(input)) ?? null;
+		const commandMatch = resolvePluginRouteMatch(plugin, input);
+		if (commandMatch) {
+			return commandMatch;
+		}
+
+		return (await plugin.routeRequest?.(input)) ?? null;
 	} catch (error: unknown) {
 		logWarn("Custom route callback failed; continuing with default router", {
 			channelId: input.channelId,
@@ -252,7 +258,7 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 	return null;
 }
 
-function buildCustomRouteDecision(match: CustomRouteMatch, content: string): ChatRouteDecision {
+function buildCustomRouteDecision(match: PluginRouteMatch, content: string): ChatRouteDecision {
 	return {
 		route: "custom",
 		confidence: match.confidence ?? "high",

@@ -1,11 +1,13 @@
-# Growth Genious
+# Growth Genius
 
-Discord-based workspace assistant for repository Q&A, code analysis, memory-backed chat, controlled self-modification, and contract-defined custom routing.
+Discord-based workspace assistant core for repository Q&A, code analysis, memory-backed chat, controlled self-modification, and plugin-scoped command routing.
 
 ## What remains in this repo
 
 - `src/bot.ts`: Discord bot entrypoint
-- `src/bot-contract.ts`: runtime contract for bot name, bot key, and custom route callback
+- `src/plugin-contract.ts`: runtime plugin contract for identity, directories, env requirements, and command routing
+- `src/plugin-loader.ts`: active plugin loading and enablement checks
+- `src/plugins/`: plugin-owned commands and docs
 - `src/chat-service.ts`: grounded chat prompt assembly and reply generation
 - `src/chat-router-service.ts`: route classification for conversation, DB lookup, workspace retrieval, code analysis, and self-modify
 - `src/chat-db-query-service.ts`: evidence retrieval from MongoDB-backed history and memory
@@ -49,30 +51,81 @@ Current bot behavior:
 - Maintains short-term and long-term memory summaries.
 - Supports a restricted self-modify flow for the authorized user.
 - Supports read-only code analysis requests for the authorized user.
-- Can short-circuit the default router through the contract-defined `routeCustomRequest(...)` callback.
+- Can short-circuit the default router through plugin commands and an optional plugin-defined route callback.
 
-## Bot contract
+## Core Vs Plugins
 
-The active runtime contract lives in `src/bot-contract.ts`.
+- Core runtime lives in the top-level `src/` services such as the bot, router, chat, memory, db, and self-modify services.
+- Plugin implementations live under `src/plugins/`.
+- Plugin-specific env lives under `apps/<plugin-folder>/`.
+- This separation is intended to make enable/disable and install/uninstall flows feasible later without pushing plugin logic into the core runtime.
+
+## Plugin Contract
+
+The active runtime contract lives in `src/plugin-contract.ts`, and the current builtin plugin implementation lives in `src/plugins/growth-genius/`.
 
 Current required fields:
 
+- `id`: stable plugin identifier used for directories and routing
 - `name`: assistant identity used by the bot and prompts
-- `discordBotKey`: bot token, currently sourced from `DISCORD_BOT_KEY`
-- `routeCustomRequest(input)`: callback invoked before the default router heuristics/LLM classifier; return `null` to continue normal routing or return a custom handler to take over the request
+- `discordBotKey`: bot token, resolved at runtime from `DISCORD_BOT_KEY` after base and plugin env files are loaded
+- `envFilePath`: plugin-specific env file path, typically `apps/{plugin-folder}/{id}.env`
+- `rootDir`: plugin-owned source/doc directory
+- `outputDir`: plugin-owned artifact directory
+- `requiredEnv`: plugin-level env requirements
+- `commands`: plugin-owned slash-style commands such as `/analytics`
+- `routeRequest(input)`: optional callback invoked after command matching and before the default router heuristics/LLM classifier
 
 Current contract shape:
 
 ```ts
-export interface BotContract {
+export interface PluginContract {
+	id: string;
 	name: string;
 	discordBotKey: string;
-	routeCustomRequest: (input: {
-		content: string;
-		channelId: string;
-		username: string;
-	}) => Promise<CustomRouteMatch | null> | CustomRouteMatch | null;
+	envFilePath: string;
+	rootDir: string;
+	outputDir: string;
+	requiredEnv: string[];
+	commands: PluginCommand[];
+	routeRequest?: (input: PluginRouteRequest) => Promise<PluginRouteMatch | null> | PluginRouteMatch | null;
 }
+```
+
+## Current Plugin
+
+- Plugin id: `growth-genius`
+- Plugin root: `src/plugins/growth-genius`
+- Plugin output: `output/growth-genius`
+- Plugin env: `apps/growth-genius/growth-genius.env`
+- Example plugin command: `/analytics`
+
+The `/analytics` command is implemented inside the plugin folder, validates Google Analytics env requirements, calls the GA4 Data API, and writes artifacts under `output/growth-genius/analytics/`.
+
+Accepted forms:
+
+- `/analytics`
+- `/analytics 30d`
+- `/analytics 2026-03-01 2026-03-21`
+
+## Plugin Env Files
+
+- Base shared env stays in `.env`
+- Plugin-specific env is loaded from `apps/{plugin-folder}/{plugin-id}.env`
+- Legacy fallback still works for `apps/{plugin-id}.env`
+- Plugin env values override `.env` values for the active plugin
+- `DISCORD_BOT_KEY` may be defined in either `.env` or the active plugin env file
+
+Example for the current app:
+
+```bash
+apps/growth-genius/growth-genius.env
+```
+
+Plugin selection env:
+
+- `PLUGIN_ID`: active plugin id
+- `ENABLED_PLUGINS`: comma-separated list of enabled builtin plugins
 ```
 
 ## Required env
@@ -88,6 +141,9 @@ export interface BotContract {
 - `MONGODB_URI`
 - `MONGODB_DB_NAME`
 - `DEBUG_FREETALK_OPENAI_INPUTS`
+- `GOOGLE_ANALYTICS_PROPERTY_ID`
+- `GOOGLE_SERVICE_ACCOUNT_EMAIL`
+- `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`
 - `mongo_db_user`
 - `mongo_db_password`
 - `mongo_db_host`
