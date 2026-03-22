@@ -26,7 +26,7 @@ interface JsonObject {
 	[key: string]: JsonValue;
 }
 
-type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime";
+type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime" | "preset";
 
 interface AnalyticsDateRange {
 	label: string;
@@ -100,6 +100,7 @@ interface AnalyticsOperationRequest {
 	searchQuery?: string;
 	adminResource?: string;
 	payload?: JsonObject;
+	presetName?: string;
 }
 
 interface AnalyticsExecutionResult {
@@ -116,6 +117,128 @@ interface AdminResourceConfig {
 	responseKey: string;
 	description: string;
 }
+
+interface PresetReportDefinition {
+	label: string;
+	description: string;
+	request: JsonObject;
+}
+
+const PRESET_REPORT_CONFIG: Record<string, PresetReportDefinition> = {
+	overview: {
+		label: "Overview",
+		description: "High-level summary: users, sessions, top events, top pages, and traffic sources.",
+		request: {
+			dimensions: [{ name: "date" }],
+			metrics: [
+				{ name: "activeUsers" },
+				{ name: "newUsers" },
+				{ name: "sessions" },
+				{ name: "screenPageViews" },
+				{ name: "engagementRate" },
+				{ name: "bounceRate" },
+				{ name: "averageSessionDuration" },
+				{ name: "eventCount" },
+			],
+			orderBys: [{ dimension: { dimensionName: "date", orderType: "ALPHANUMERIC" } }],
+			metricAggregations: ["TOTAL"],
+			limit: "90",
+		},
+	},
+	events: {
+		label: "Events",
+		description: "All events ranked by count, with unique user counts.",
+		request: {
+			dimensions: [{ name: "eventName" }],
+			metrics: [
+				{ name: "eventCount" },
+				{ name: "totalUsers" },
+				{ name: "eventCountPerUser" },
+			],
+			orderBys: [{ metric: { metricName: "eventCount" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "50",
+		},
+	},
+	pages: {
+		label: "Pages",
+		description: "Top pages by views, including engagement and average time.",
+		request: {
+			dimensions: [{ name: "pagePath" }],
+			metrics: [
+				{ name: "screenPageViews" },
+				{ name: "activeUsers" },
+				{ name: "engagementRate" },
+				{ name: "averageSessionDuration" },
+			],
+			orderBys: [{ metric: { metricName: "screenPageViews" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "30",
+		},
+	},
+	landing: {
+		label: "Landing Pages",
+		description: "Top entry pages where sessions begin.",
+		request: {
+			dimensions: [{ name: "landingPagePlusQueryString" }],
+			metrics: [
+				{ name: "sessions" },
+				{ name: "activeUsers" },
+				{ name: "bounceRate" },
+				{ name: "averageSessionDuration" },
+			],
+			orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "30",
+		},
+	},
+	sources: {
+		label: "Traffic Sources",
+		description: "Where traffic comes from: source, medium, and campaign.",
+		request: {
+			dimensions: [{ name: "sessionSource" }, { name: "sessionMedium" }],
+			metrics: [
+				{ name: "sessions" },
+				{ name: "activeUsers" },
+				{ name: "engagementRate" },
+				{ name: "conversions" },
+			],
+			orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "30",
+		},
+	},
+	devices: {
+		label: "Devices",
+		description: "Device category and browser breakdown.",
+		request: {
+			dimensions: [{ name: "deviceCategory" }, { name: "browser" }],
+			metrics: [
+				{ name: "activeUsers" },
+				{ name: "sessions" },
+				{ name: "engagementRate" },
+			],
+			orderBys: [{ metric: { metricName: "activeUsers" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "25",
+		},
+	},
+	geo: {
+		label: "Geography",
+		description: "Users by country and city.",
+		request: {
+			dimensions: [{ name: "country" }, { name: "city" }],
+			metrics: [
+				{ name: "activeUsers" },
+				{ name: "sessions" },
+				{ name: "engagementRate" },
+			],
+			orderBys: [{ metric: { metricName: "activeUsers" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "30",
+		},
+	},
+};
 
 const ADMIN_RESOURCE_CONFIG: Record<string, AdminResourceConfig> = {
 	"custom-dimensions": {
@@ -305,8 +428,16 @@ function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 				kind: operationName,
 				payload: parseJsonPayload(operationName, remainder),
 			};
-		default:
+		default: {
+			if (operationName in PRESET_REPORT_CONFIG) {
+				return {
+					kind: "preset",
+					presetName: operationName,
+					dateRange: remainder ? parseAnalyticsDateRange(remainder) : buildTrailingDayRange(DEFAULT_LOOKBACK_DAYS),
+				};
+			}
 			throw new Error(buildHelpText());
+		}
 	}
 }
 
@@ -355,12 +486,24 @@ async function executeAnalyticsOperation(input: {
 			return await executeFunnelRequest(input.propertyId, input.accessToken, input.operation.payload!);
 		case "realtime":
 			return await executeRealtimeRequest(input.propertyId, input.accessToken, input.operation.payload!);
+		case "preset":
+			return await executePresetRequest(input.propertyId, input.accessToken, input.operation.presetName!, input.operation.dateRange!);
 	}
 }
 
 function buildHelpExecutionResult(): AnalyticsExecutionResult {
+	const presetList = Object.entries(PRESET_REPORT_CONFIG)
+		.map(([name, config]) => `- \`/analytics ${name}\` — ${config.description}`)
+		.join("\n");
+
 	const summaryMarkdown = [
 		"# Analytics Command Help",
+		"",
+		"## Quick presets (proactive reports)",
+		"",
+		presetList,
+		"",
+		"All presets default to the last 7 days. Add a date range: `/analytics events 30d` or `/analytics pages 2026-03-01 2026-03-21`.",
 		"",
 		"## Preserved default report",
 		"",
@@ -391,6 +534,7 @@ function buildHelpExecutionResult(): AnalyticsExecutionResult {
 	return {
 		reply: [
 			"/analytics help",
+			`presets=${Object.keys(PRESET_REPORT_CONFIG).join(",")}`,
 			"legacyReport=true",
 			"metadata=true",
 			`adminResources=${Object.keys(ADMIN_RESOURCE_CONFIG).join(",")}`,
@@ -686,6 +830,154 @@ async function executeFunnelRequest(propertyId: string, accessToken: string, pay
 		responsePayload: report as JsonObject,
 		summaryMarkdown,
 	};
+}
+
+async function executePresetRequest(
+	propertyId: string,
+	accessToken: string,
+	presetName: string,
+	dateRange: AnalyticsDateRange,
+): Promise<AnalyticsExecutionResult> {
+	const preset = PRESET_REPORT_CONFIG[presetName];
+	const requestBody: JsonObject = {
+		...cloneJsonObject(preset.request),
+		dateRanges: [{ startDate: dateRange.startDate, endDate: dateRange.endDate }],
+	};
+
+	if (presetName === "overview") {
+		return await executeOverviewPreset(propertyId, accessToken, dateRange);
+	}
+
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runReport`,
+		accessToken,
+		body: requestBody,
+	});
+
+	const summary = buildReportSummary(report, dateRange, propertyId, `Analytics Preset: ${preset.label}`);
+	const rowCount = report.rowCount ?? report.rows?.length ?? 0;
+	const topEntries = buildTopRowsPreview(report, 10);
+
+	const summaryMarkdown = [
+		summary.markdown,
+		"",
+		`## Top ${preset.label}`,
+		"",
+		...topEntries,
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics ${presetName} for property ${propertyId}.`,
+			`preset=${preset.label}`,
+			`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+			`rows=${rowCount}`,
+			"",
+			`## Top ${preset.label}`,
+			"",
+			...topEntries,
+		].join("\n"),
+		requestPayload: { kind: "preset", preset: presetName, request: requestBody },
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+		legacyReportArtifact: report as JsonObject,
+	};
+}
+
+async function executeOverviewPreset(
+	propertyId: string,
+	accessToken: string,
+	dateRange: AnalyticsDateRange,
+): Promise<AnalyticsExecutionResult> {
+	const dateRanges = [{ startDate: dateRange.startDate, endDate: dateRange.endDate }];
+
+	const [mainReport, eventsReport, pagesReport, sourcesReport] = await Promise.all([
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.overview.request), dateRanges },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.events.request), dateRanges, limit: "15" },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.pages.request), dateRanges, limit: "10" },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.sources.request), dateRanges, limit: "10" },
+		}),
+	]);
+
+	const mainSummary = buildReportSummary(mainReport, dateRange, propertyId, "Analytics Overview");
+
+	const summaryMarkdown = [
+		mainSummary.markdown,
+		"",
+		"## Top Events",
+		"",
+		...buildTopRowsPreview(eventsReport, 15),
+		"",
+		"## Top Pages",
+		"",
+		...buildTopRowsPreview(pagesReport, 10),
+		"",
+		"## Top Traffic Sources",
+		"",
+		...buildTopRowsPreview(sourcesReport, 10),
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics overview for property ${propertyId}.`,
+			`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+			`activeUsers=${mainSummary.totals.activeUsers ?? "0"}`,
+			`sessions=${mainSummary.totals.sessions ?? "0"}`,
+			`pageViews=${mainSummary.totals.screenPageViews ?? "0"}`,
+			`events=${mainSummary.totals.eventCount ?? "0"}`,
+			`engagementRate=${mainSummary.totals.engagementRate ?? "0"}`,
+			`bounceRate=${mainSummary.totals.bounceRate ?? "0"}`,
+			`topEvents=${(eventsReport.rows ?? []).slice(0, 5).map((r) => r.dimensionValues?.[0]?.value).filter(Boolean).join(",")}`,
+			`topPages=${(pagesReport.rows ?? []).slice(0, 5).map((r) => r.dimensionValues?.[0]?.value).filter(Boolean).join(",")}`,
+		].join("\n"),
+		requestPayload: { kind: "preset", preset: "overview" },
+		responsePayload: {
+			mainReport: mainReport as JsonObject,
+			eventsReport: eventsReport as JsonObject,
+			pagesReport: pagesReport as JsonObject,
+			sourcesReport: sourcesReport as JsonObject,
+		},
+		summaryMarkdown,
+		legacyReportArtifact: mainReport as JsonObject,
+	};
+}
+
+function buildTopRowsPreview(report: GoogleAnalyticsReportResponse, limit: number): string[] {
+	const rows = report.rows ?? [];
+	if (rows.length === 0) {
+		return ["- no data"];
+	}
+
+	const dimHeaders = (report.dimensionHeaders ?? []).map((h) => h.name);
+	const metricHeaders = (report.metricHeaders ?? []).map((h) => h.name);
+
+	return rows.slice(0, limit).map((row, index) => {
+		const dims = (row.dimensionValues ?? []).map((v) => v.value).join(" / ");
+		const metrics = (row.metricValues ?? [])
+			.map((v, i) => `${metricHeaders[i] ?? "metric"}: ${formatMetricValue(metricHeaders[i] ?? "", v.value)}`)
+			.join(", ");
+		return `${index + 1}. **${dims}** — ${metrics}`;
+	});
 }
 
 function parseAnalyticsDateRange(args: string): AnalyticsDateRange {
@@ -1161,12 +1453,14 @@ function describeRequestDateRanges(dateRanges: JsonValue | undefined): string {
 }
 
 function buildHelpText(): string {
+	const presetNames = Object.keys(PRESET_REPORT_CONFIG).join(", ");
 	return [
 		"Unsupported /analytics args.",
 		"Use one of:",
 		"- '/analytics'",
 		"- '/analytics 30d'",
 		"- '/analytics 2026-03-01 2026-03-21'",
+		`- '/analytics <preset> [date]' where <preset> is one of: ${presetNames}`,
 		"- '/analytics metadata [search]'",
 		`- '/analytics admin <resource>' where <resource> is one of ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}`,
 		"- '/analytics report {json}'",
