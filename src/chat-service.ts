@@ -22,6 +22,7 @@ const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
 
 export interface GenerateChatReplyInput {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	assistantName: string;
 	guildId: string;
 	channelId: string;
@@ -37,11 +38,13 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	const openAiModel = getChatOpenAiModel();
 	const enableFreeTalkOpenAiDebug = isFreeTalkOpenAiDebugEnabled();
 	const sessionKey = buildChatSessionKey({
+		pluginId: input.pluginId,
 		guildId: input.guildId,
 		channelId: input.channelId,
 	});
 
 	await appendChatMessage(input.database, {
+		pluginId: input.pluginId,
 		sessionKey,
 		guildId: input.guildId,
 		channelId: input.channelId,
@@ -62,6 +65,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	try {
 		memorySnapshot = await getChatMemorySnapshot({
 			database: input.database,
+			pluginId: input.pluginId,
 			sessionKey,
 			userId: input.userId,
 		});
@@ -75,11 +79,13 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	}
 
 	const recentMessages = await listRecentChatMessages(input.database, {
+		pluginId: input.pluginId,
 		sessionKey,
 		limit: DEFAULT_HISTORY_LIMIT,
 		kinds: ["chat"],
 	});
 	const latestJobContext = await getLatestJobContext(input.database, {
+		pluginId: input.pluginId,
 		sessionKey,
 	});
 	const contextMarkdown = await readOptionalContextMarkdown();
@@ -114,6 +120,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	if (enableFreeTalkOpenAiDebug) {
 		await persistFreeTalkOpenAiDebugInput({
 			database: input.database,
+			pluginId: input.pluginId,
 			sessionKey,
 			guildId: input.guildId,
 			channelId: input.channelId,
@@ -327,6 +334,7 @@ function buildChatPrompt(input: {
 
 async function persistFreeTalkOpenAiDebugInput(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	guildId: string;
 	channelId: string;
@@ -344,6 +352,7 @@ async function persistFreeTalkOpenAiDebugInput(input: {
 
 	try {
 		await createOpenAiDebugInput(input.database, {
+			pluginId: input.pluginId,
 			source: "freetalk",
 			sessionKey: input.sessionKey,
 			guildId: input.guildId,

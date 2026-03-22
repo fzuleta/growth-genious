@@ -15,6 +15,7 @@
     "dev": "nodemon --watch src --watch workspace-template --watch .env --ext ts,md,json --signal SIGTERM --exec \"tsx src/bot.ts\"",
     "dev:bot": "nodemon --watch src --watch workspace-template --watch .env --ext ts,md,json --signal SIGTERM --exec \"tsx src/bot.ts\"",
     "veil": "tsx src/growth.ts",
+    "migrate:plugin-namespace": "tsx src/migrate-plugin-namespace.ts",
     "build": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

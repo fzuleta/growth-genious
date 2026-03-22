@@ -36,6 +36,7 @@ export type MemoryCheckpointKind = "session-short-term" | "user-long-term";
 
 export interface ChatSessionDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	sessionKey: string;
 	guildId: string;
 	channelId: string;
@@ -53,6 +54,7 @@ export interface ChatSessionDocument {
 
 export interface ChatMessageDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	sessionKey: string;
 	guildId: string;
 	channelId: string;
@@ -67,6 +69,7 @@ export interface ChatMessageDocument {
 
 export interface MemoryEntryDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	kind: MemoryEntryKind;
 	scope: MemoryEntryScope;
 	sessionKey?: string | null;
@@ -84,6 +87,7 @@ export interface MemoryEntryDocument {
 
 export interface MemoryCheckpointDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	kind: MemoryCheckpointKind;
 	sessionKey?: string | null;
 	guildId?: string | null;
@@ -98,6 +102,7 @@ export interface MemoryCheckpointDocument {
 
 export interface GenerationJobDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	jobId: string;
 	source: "discord";
 	status: "queued" | "running" | "completed" | "failed";
@@ -150,6 +155,7 @@ export interface ContextDocument {
 
 export interface OpenAiDebugInputDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	source: "freetalk" | "router";
 	sessionKey: string;
 	guildId: string;
@@ -224,15 +230,17 @@ export async function initializeMongoDatabase(env = process.env): Promise<Smedia
 }
 
 export function buildChatSessionKey(input: {
+	pluginId: string;
 	guildId: string;
 	channelId: string;
 }): string {
-	return `${input.guildId}:${input.channelId}`;
+	return `${input.pluginId}:${input.guildId}:${input.channelId}`;
 }
 
 export async function appendChatMessage(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionKey: string;
 		guildId: string;
 		channelId: string;
@@ -253,6 +261,7 @@ export async function appendChatMessage(
 
 	await Promise.all([
 		database.collections.chatMessages.insertOne({
+			pluginId: input.pluginId,
 			sessionKey: input.sessionKey,
 			guildId: input.guildId,
 			channelId: input.channelId,
@@ -265,9 +274,10 @@ export async function appendChatMessage(
 			createdAt,
 		}),
 		database.collections.chatSessions.updateOne(
-			{ sessionKey: input.sessionKey },
+			{ pluginId: input.pluginId, sessionKey: input.sessionKey },
 			{
 				$setOnInsert: {
+					pluginId: input.pluginId,
 					sessionKey: input.sessionKey,
 					guildId: input.guildId,
 					channelId: input.channelId,
@@ -292,11 +302,12 @@ export async function appendChatMessage(
 
 export async function markSessionConsolidated(
 	database: SmediaMongoDatabase,
+	pluginId: string,
 	sessionKey: string,
 	consolidatedAt: Date,
 ): Promise<void> {
 	await database.collections.chatSessions.updateOne(
-		{ sessionKey },
+		{ pluginId, sessionKey },
 		{ $set: { lastConsolidatedAt: consolidatedAt } },
 	);
 }
@@ -304,12 +315,14 @@ export async function markSessionConsolidated(
 export async function listRecentChatMessages(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionKey: string;
 		limit: number;
 		kinds?: ChatMessageKind[];
 	},
 ): Promise<ChatMessageDocument[]> {
 	const filter: Document = {
+		pluginId: input.pluginId,
 		sessionKey: input.sessionKey,
 	};
 
@@ -329,6 +342,7 @@ export async function listRecentChatMessages(
 export async function listChatMessagesForMemoryWindow(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionKey: string;
 		kinds?: ChatMessageKind[];
 		afterCreatedAt?: Date;
@@ -337,6 +351,7 @@ export async function listChatMessagesForMemoryWindow(
 	},
 ): Promise<ChatMessageDocument[]> {
 	const filter: Document = {
+		pluginId: input.pluginId,
 		sessionKey: input.sessionKey,
 	};
 
@@ -365,6 +380,7 @@ export async function listChatMessagesForMemoryWindow(
 export async function getLatestJobContext(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionKey: string;
 	},
 ): Promise<{
@@ -374,6 +390,7 @@ export async function getLatestJobContext(
 	const [latestCommand, latestJobUpdate] = await Promise.all([
 		database.collections.chatMessages.findOne(
 			{
+				pluginId: input.pluginId,
 				sessionKey: input.sessionKey,
 				kind: "command",
 			},
@@ -383,6 +400,7 @@ export async function getLatestJobContext(
 		),
 		database.collections.chatMessages.findOne(
 			{
+				pluginId: input.pluginId,
 				sessionKey: input.sessionKey,
 				kind: "job-update",
 			},
@@ -401,6 +419,7 @@ export async function getLatestJobContext(
 export async function createMemoryEntry(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kind: MemoryEntryKind;
 		scope: MemoryEntryScope;
 		sessionKey?: string | null;
@@ -424,6 +443,7 @@ export async function createMemoryEntry(
 	}
 
 	const document: MemoryEntryDocument = {
+		pluginId: input.pluginId,
 		kind: input.kind,
 		scope: input.scope,
 		sessionKey: input.sessionKey ?? null,
@@ -447,7 +467,7 @@ export async function createMemoryEntry(
 
 	if (document.scope === "session" && document.sessionKey) {
 		await database.collections.chatSessions.updateOne(
-			{ sessionKey: document.sessionKey },
+			{ pluginId: document.pluginId, sessionKey: document.sessionKey },
 			{
 				$addToSet: {
 					memoryEntryIds: result.insertedId,
@@ -462,6 +482,7 @@ export async function createMemoryEntry(
 export async function upsertMemoryEntry(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kind: MemoryEntryKind;
 		scope: MemoryEntryScope;
 		sessionKey?: string | null;
@@ -481,7 +502,7 @@ export async function upsertMemoryEntry(
 		throw new Error("Cannot upsert an empty memory entry.");
 	}
 
-	const filter: Document = { kind: input.kind, scope: input.scope };
+	const filter: Document = { pluginId: input.pluginId, kind: input.kind, scope: input.scope };
 	if (input.sessionKey) {
 		filter.sessionKey = input.sessionKey;
 	}
@@ -493,6 +514,7 @@ export async function upsertMemoryEntry(
 		filter,
 		{
 			$setOnInsert: {
+				pluginId: input.pluginId,
 				kind: input.kind,
 				scope: input.scope,
 				sessionKey: input.sessionKey ?? null,
@@ -526,6 +548,7 @@ export async function upsertMemoryEntry(
 export async function createGenerationJob(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		jobId: string;
 		source: "discord";
 		guildId?: string | null;
@@ -545,6 +568,7 @@ export async function createGenerationJob(
 ): Promise<GenerationJobDocument> {
 	const createdAt = input.createdAt ?? new Date();
 	const document: GenerationJobDocument = {
+		pluginId: input.pluginId,
 		jobId: input.jobId,
 		source: input.source,
 		status: "queued",
@@ -592,6 +616,7 @@ export async function createGenerationJob(
 export async function updateGenerationJob(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		jobId: string;
 		status?: "queued" | "running" | "completed" | "failed";
 		resolved?: {
@@ -635,7 +660,7 @@ export async function updateGenerationJob(
 	}
 
 	await database.collections.generationJobs.updateOne(
-		{ jobId: input.jobId },
+		{ pluginId: input.pluginId, jobId: input.jobId },
 		{
 			$set: setDocument,
 		},
@@ -645,6 +670,7 @@ export async function updateGenerationJob(
 export async function appendGenerationJobEvent(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		jobId: string;
 		stage: string;
 		status: GenerationJobEventDocument["status"];
@@ -655,7 +681,7 @@ export async function appendGenerationJobEvent(
 ): Promise<void> {
 	const createdAt = input.createdAt ?? new Date();
 	await database.collections.generationJobs.updateOne(
-		{ jobId: input.jobId },
+		{ pluginId: input.pluginId, jobId: input.jobId },
 		{
 			$set: {
 				updatedAt: createdAt,
@@ -675,14 +701,21 @@ export async function appendGenerationJobEvent(
 
 export async function getGenerationJobById(
 	database: SmediaMongoDatabase,
-	jobId: string,
+	input: {
+		pluginId: string;
+		jobId: string;
+	},
 ): Promise<GenerationJobDocument | null> {
-	return database.collections.generationJobs.findOne({ jobId: jobId.trim() });
+	return database.collections.generationJobs.findOne({
+		pluginId: input.pluginId,
+		jobId: input.jobId.trim(),
+	});
 }
 
 export async function listRecentGenerationJobs(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		requestedByUserId?: string;
 		guildId?: string;
 		channelId?: string;
@@ -690,7 +723,9 @@ export async function listRecentGenerationJobs(
 		limit: number;
 	},
 ): Promise<GenerationJobDocument[]> {
-	const filter: Document = {};
+	const filter: Document = {
+		pluginId: input.pluginId,
+	};
 
 	if (input.requestedByUserId) {
 		filter.requestedByUserId = input.requestedByUserId;
@@ -715,6 +750,7 @@ export async function listRecentGenerationJobs(
 export async function getMemoryCheckpoint(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kind: MemoryCheckpointKind;
 		sessionKey?: string;
 		userId?: string;
@@ -729,6 +765,7 @@ export async function getMemoryCheckpoint(
 export async function upsertMemoryCheckpoint(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kind: MemoryCheckpointKind;
 		sessionKey?: string | null;
 		guildId?: string | null;
@@ -742,6 +779,7 @@ export async function upsertMemoryCheckpoint(
 ): Promise<MemoryCheckpointDocument> {
 	const now = input.updatedAt ?? new Date();
 	const filter = buildMemoryCheckpointFilter({
+		pluginId: input.pluginId,
 		kind: input.kind,
 		sessionKey: input.sessionKey ?? undefined,
 		userId: input.userId ?? undefined,
@@ -750,6 +788,7 @@ export async function upsertMemoryCheckpoint(
 		filter,
 		{
 			$setOnInsert: {
+				pluginId: input.pluginId,
 				kind: input.kind,
 				sessionKey: input.sessionKey ?? null,
 				userId: input.userId ?? null,
@@ -780,6 +819,7 @@ export async function upsertMemoryCheckpoint(
 export async function createOpenAiDebugInput(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		source: "freetalk" | "router";
 		sessionKey: string;
 		guildId: string;
@@ -811,6 +851,7 @@ export async function createOpenAiDebugInput(
 	}
 
 	const document: OpenAiDebugInputDocument = {
+		pluginId: input.pluginId,
 		source: input.source,
 		sessionKey: input.sessionKey,
 		guildId: input.guildId,
@@ -835,6 +876,7 @@ export async function createOpenAiDebugInput(
 export async function listMemoryEntries(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kinds?: MemoryEntryKind[];
 		scope?: MemoryEntryScope;
 		sessionKey?: string;
@@ -856,6 +898,7 @@ export async function listMemoryEntries(
 export async function searchChatMessages(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionKey?: string;
 		guildId?: string;
 		channelId?: string;
@@ -873,6 +916,7 @@ export async function searchChatMessages(
 	}
 
 	const filter: Document = {
+		pluginId: input.pluginId,
 		content: {
 			$regex: cleanedKeywords.map(escapeRegex).join("|"),
 			$options: "i",
@@ -905,6 +949,7 @@ export async function searchChatMessages(
 export async function getLatestMemoryEntry(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		kinds?: MemoryEntryKind[];
 		scope?: MemoryEntryScope;
 		sessionKey?: string;
@@ -989,6 +1034,7 @@ function parseMongoTls(value: string | undefined): boolean {
 }
 
 function buildMemoryFilter(input: {
+	pluginId: string;
 	kinds?: MemoryEntryKind[];
 	scope?: MemoryEntryScope;
 	sessionKey?: string;
@@ -997,6 +1043,7 @@ function buildMemoryFilter(input: {
 	userId?: string;
 }): Document {
 	const filter: Document = {};
+	filter.pluginId = input.pluginId;
 
 	if (input.kinds && input.kinds.length > 0) {
 		filter.kind = { $in: input.kinds };
@@ -1021,11 +1068,13 @@ function buildMemoryFilter(input: {
 }
 
 function buildMemoryCheckpointFilter(input: {
+	pluginId: string;
 	kind: MemoryCheckpointKind;
 	sessionKey?: string;
 	userId?: string;
 }): Document {
 	const filter: Document = {
+		pluginId: input.pluginId,
 		kind: input.kind,
 	};
 
@@ -1060,18 +1109,40 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 	await Promise.allSettled([
 		collections.memoryEntries.dropIndex("session_short_term_ttl_30d"),
 		collections.memoryCheckpoints.dropIndex("session_short_term_checkpoint_ttl_30d"),
+		collections.chatSessions.dropIndex("sessionKey_unique"),
+		collections.chatSessions.dropIndex("guild_channel_updatedAt"),
+		collections.chatMessages.dropIndex("sessionKey_createdAt"),
+		collections.chatMessages.dropIndex("guild_channel_createdAt"),
+		collections.chatMessages.dropIndex("createdAt_desc"),
+		collections.memoryEntries.dropIndex("kind_updatedAt"),
+		collections.memoryEntries.dropIndex("scope_updatedAt"),
+		collections.memoryEntries.dropIndex("sessionKey_kind_updatedAt"),
+		collections.memoryEntries.dropIndex("userId_kind_updatedAt"),
+		collections.memoryCheckpoints.dropIndex("kind_sessionKey_unique"),
+		collections.memoryCheckpoints.dropIndex("kind_userId_unique"),
+		collections.memoryCheckpoints.dropIndex("updatedAt_desc"),
+		collections.generationJobs.dropIndex("jobId_unique"),
+		collections.generationJobs.dropIndex("status_updatedAt"),
+		collections.generationJobs.dropIndex("resolved_modelId_completedAt"),
+		collections.generationJobs.dropIndex("resolved_postType_completedAt"),
+		collections.generationJobs.dropIndex("requestedByUserId_createdAt"),
+		collections.generationJobs.dropIndex("guild_channel_createdAt"),
+		collections.generationJobs.dropIndex("createdAt_desc"),
+		collections.openAiDebugInputs.dropIndex("source_createdAt"),
+		collections.openAiDebugInputs.dropIndex("sessionKey_createdAt"),
+		collections.openAiDebugInputs.dropIndex("createdAt_desc"),
 	]);
 
 	await Promise.all([
 		collections.chatSessions.createIndexes([
 			{
-				key: { sessionKey: 1 },
-				name: "sessionKey_unique",
+				key: { pluginId: 1, sessionKey: 1 },
+				name: "plugin_sessionKey_unique",
 				unique: true,
 			},
 			{
-				key: { guildId: 1, channelId: 1, updatedAt: -1 },
-				name: "guild_channel_updatedAt",
+				key: { pluginId: 1, guildId: 1, channelId: 1, updatedAt: -1 },
+				name: "plugin_guild_channel_updatedAt",
 			},
 			{
 				key: { lastMessageAt: 1 },
@@ -1081,16 +1152,16 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 		]),
 		collections.chatMessages.createIndexes([
 			{
-				key: { sessionKey: 1, createdAt: -1 },
-				name: "sessionKey_createdAt",
+				key: { pluginId: 1, sessionKey: 1, createdAt: -1 },
+				name: "plugin_sessionKey_createdAt",
 			},
 			{
-				key: { guildId: 1, channelId: 1, createdAt: -1 },
-				name: "guild_channel_createdAt",
+				key: { pluginId: 1, guildId: 1, channelId: 1, createdAt: -1 },
+				name: "plugin_guild_channel_createdAt",
 			},
 			{
-				key: { createdAt: -1 },
-				name: "createdAt_desc",
+				key: { pluginId: 1, createdAt: -1 },
+				name: "plugin_createdAt_desc",
 			},
 			{
 				key: { createdAt: 1 },
@@ -1100,21 +1171,21 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 		]),
 		collections.memoryEntries.createIndexes([
 			{
-				key: { kind: 1, updatedAt: -1 },
-				name: "kind_updatedAt",
+				key: { pluginId: 1, kind: 1, updatedAt: -1 },
+				name: "plugin_kind_updatedAt",
 			},
 			{
-				key: { scope: 1, updatedAt: -1 },
-				name: "scope_updatedAt",
+				key: { pluginId: 1, scope: 1, updatedAt: -1 },
+				name: "plugin_scope_updatedAt",
 			},
 			{
-				key: { sessionKey: 1, kind: 1, updatedAt: -1 },
-				name: "sessionKey_kind_updatedAt",
+				key: { pluginId: 1, sessionKey: 1, kind: 1, updatedAt: -1 },
+				name: "plugin_sessionKey_kind_updatedAt",
 				sparse: true,
 			},
 			{
-				key: { userId: 1, kind: 1, updatedAt: -1 },
-				name: "userId_kind_updatedAt",
+				key: { pluginId: 1, userId: 1, kind: 1, updatedAt: -1 },
+				name: "plugin_userId_kind_updatedAt",
 				sparse: true,
 			},
 			{
@@ -1125,55 +1196,55 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 		]),
 		collections.memoryCheckpoints.createIndexes([
 			{
-				key: { kind: 1, sessionKey: 1 },
-				name: "kind_sessionKey_unique",
+				key: { pluginId: 1, kind: 1, sessionKey: 1 },
+				name: "plugin_kind_sessionKey_unique",
 				unique: true,
 				partialFilterExpression: { sessionKey: { $exists: true, $type: "string" } },
 			},
 			{
-				key: { kind: 1, userId: 1 },
-				name: "kind_userId_unique",
+				key: { pluginId: 1, kind: 1, userId: 1 },
+				name: "plugin_kind_userId_unique",
 				unique: true,
 				partialFilterExpression: { userId: { $exists: true, $type: "string" } },
 			},
 			{
-				key: { updatedAt: -1 },
-				name: "updatedAt_desc",
+				key: { pluginId: 1, updatedAt: -1 },
+				name: "plugin_updatedAt_desc",
 			},
 		]),
 		collections.generationJobs.createIndexes([
 			{
-				key: { jobId: 1 },
-				name: "jobId_unique",
+				key: { pluginId: 1, jobId: 1 },
+				name: "plugin_jobId_unique",
 				unique: true,
 			},
 			{
-				key: { status: 1, updatedAt: -1 },
-				name: "status_updatedAt",
+				key: { pluginId: 1, status: 1, updatedAt: -1 },
+				name: "plugin_status_updatedAt",
 			},
 			{
-				key: { "resolved.modelId": 1, completedAt: -1 },
-				name: "resolved_modelId_completedAt",
+				key: { pluginId: 1, "resolved.modelId": 1, completedAt: -1 },
+				name: "plugin_resolved_modelId_completedAt",
 				sparse: true,
 			},
 			{
-				key: { "resolved.postType": 1, completedAt: -1 },
-				name: "resolved_postType_completedAt",
+				key: { pluginId: 1, "resolved.postType": 1, completedAt: -1 },
+				name: "plugin_resolved_postType_completedAt",
 				sparse: true,
 			},
 			{
-				key: { requestedByUserId: 1, createdAt: -1 },
-				name: "requestedByUserId_createdAt",
+				key: { pluginId: 1, requestedByUserId: 1, createdAt: -1 },
+				name: "plugin_requestedByUserId_createdAt",
 				sparse: true,
 			},
 			{
-				key: { guildId: 1, channelId: 1, createdAt: -1 },
-				name: "guild_channel_createdAt",
+				key: { pluginId: 1, guildId: 1, channelId: 1, createdAt: -1 },
+				name: "plugin_guild_channel_createdAt",
 				sparse: true,
 			},
 			{
-				key: { createdAt: -1 },
-				name: "createdAt_desc",
+				key: { pluginId: 1, createdAt: -1 },
+				name: "plugin_createdAt_desc",
 			},
 		]),
 		collections.contextDocuments.createIndexes([
@@ -1189,16 +1260,16 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 		]),
 		collections.openAiDebugInputs.createIndexes([
 			{
-				key: { source: 1, createdAt: -1 },
-				name: "source_createdAt",
+				key: { pluginId: 1, source: 1, createdAt: -1 },
+				name: "plugin_source_createdAt",
 			},
 			{
-				key: { sessionKey: 1, createdAt: -1 },
-				name: "sessionKey_createdAt",
+				key: { pluginId: 1, sessionKey: 1, createdAt: -1 },
+				name: "plugin_sessionKey_createdAt",
 			},
 			{
-				key: { createdAt: -1 },
-				name: "createdAt_desc",
+				key: { pluginId: 1, createdAt: -1 },
+				name: "plugin_createdAt_desc",
 			},
 			{
 				key: { createdAt: 1 },

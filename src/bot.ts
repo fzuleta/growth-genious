@@ -154,7 +154,9 @@ client.on("messageCreate", async (message) => {
 		try {
 			const inspectReply = await formatMemoryInspect({
 				database: mongoDatabase,
+				pluginId: currentPlugin.id,
 				sessionKey: buildChatSessionKey({
+					pluginId: currentPlugin.id,
 					guildId: message.guildId as string,
 					channelId: message.channelId,
 				}),
@@ -181,7 +183,7 @@ client.on("messageCreate", async (message) => {
 	// Self-modify session interception: check if there's an active session awaiting approval
 	if (message.author.id === commandUserId) {
 		try {
-			const activeSession = await getActiveSelfModifySession(mongoDatabase, message.channelId);
+			const activeSession = await getActiveSelfModifySession(mongoDatabase, currentPlugin.id, message.channelId);
 			if (activeSession && activeSession.state === "awaiting-approval") {
 				const normalized = content.trim().toLowerCase();
 				if (/^(approve|go|yes|lgtm|do it|go ahead|ship it)$/i.test(normalized)) {
@@ -231,6 +233,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 	const lastMessage = messages[messages.length - 1]!;
 	const combinedContent = messages.map((m) => m.content.trim()).join("\n");
 	const sessionKey = buildChatSessionKey({
+		pluginId: currentPlugin.id,
 		guildId: lastMessage.guildId!,
 		channelId: lastMessage.channelId,
 	});
@@ -248,6 +251,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		if (readBooleanEnv(process.env.DEBUG_FREETALK_OPENAI_INPUTS)) {
 			await persistRouterOpenAiDebugInput({
 				database,
+				pluginId: currentPlugin.id,
 				sessionKey,
 				guildId: lastMessage.guildId!,
 				channelId: lastMessage.channelId,
@@ -263,6 +267,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		const routeEvidence = routeDecision.route === "db-query"
 			? await retrieveDbRouteEvidence({
 				database,
+				pluginId: currentPlugin.id,
 				sessionKey,
 				guildId: lastMessage.guildId!,
 				channelId: lastMessage.channelId,
@@ -324,6 +329,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 
 		const reply = await generateChatReply({
 			database,
+			pluginId: currentPlugin.id,
 			assistantName: currentPlugin.name,
 			guildId: lastMessage.guildId!,
 			channelId: lastMessage.channelId,
@@ -385,6 +391,7 @@ async function handleSelfModifyStart(
 	try {
 		const result = await startSelfModifySession({
 			database,
+			pluginId: currentPlugin.id,
 			guildId: message.guildId!,
 			channelId: message.channelId,
 			userId: message.author.id,
@@ -496,7 +503,7 @@ async function handleSelfModifyFeedback(
 
 async function handlePostRestartSessions(database: SmediaMongoDatabase): Promise<void> {
 	try {
-		const sessions = await checkPostRestartSessions(database);
+		const sessions = await checkPostRestartSessions(database, currentPlugin.id);
 		for (const session of sessions) {
 			const channel = client.channels.cache.get(session.channelId);
 			if (channel && "send" in channel) {
@@ -515,6 +522,7 @@ async function handlePostRestartSessions(database: SmediaMongoDatabase): Promise
 
 async function persistRouterOpenAiDebugInput(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	guildId: string;
 	channelId: string;
@@ -570,6 +578,7 @@ async function persistRouterOpenAiDebugInput(input: {
 
 	try {
 		await createOpenAiDebugInput(input.database, {
+			pluginId: input.pluginId,
 			source: "router",
 			sessionKey: input.sessionKey,
 			guildId: input.guildId,
@@ -745,6 +754,7 @@ async function executeMemoryConsolidationCycle(): Promise<Awaited<
 		try {
 			return await runChatMemoryConsolidationCycle({
 				database: mongoDatabase as SmediaMongoDatabase,
+				pluginId: currentPlugin.id,
 			});
 		} catch (error: unknown) {
 			logWarn("Scheduled chat memory consolidation failed", {
@@ -832,7 +842,9 @@ async function persistInboundDiscordMessage(
 	kind: ChatMessageKind,
 ): Promise<void> {
 	await appendChatMessage(database, {
+		pluginId: currentPlugin.id,
 		sessionKey: buildChatSessionKey({
+			pluginId: currentPlugin.id,
 			guildId: message.guildId as string,
 			channelId: message.channelId,
 		}),
@@ -856,7 +868,9 @@ async function persistInboundChatContent(
 	content: string,
 ): Promise<void> {
 	await appendChatMessage(database, {
+		pluginId: currentPlugin.id,
 		sessionKey: buildChatSessionKey({
+			pluginId: currentPlugin.id,
 			guildId: message.guildId as string,
 			channelId: message.channelId,
 		}),
@@ -881,7 +895,9 @@ async function persistOutboundDiscordMessage(
 	kind: ChatMessageKind,
 ): Promise<void> {
 	await appendChatMessage(database, {
+		pluginId: currentPlugin.id,
 		sessionKey: buildChatSessionKey({
+			pluginId: currentPlugin.id,
 			guildId: sourceMessage.guildId as string,
 			channelId: sourceMessage.channelId,
 		}),
@@ -900,7 +916,7 @@ async function persistOutboundDiscordMessage(
 }
 
 async function formatBotStatus(database: SmediaMongoDatabase, channelId: string): Promise<string> {
-	const activeSession = await getActiveSelfModifySession(database, channelId);
+	const activeSession = await getActiveSelfModifySession(database, currentPlugin.id, channelId);
 	const missingPluginEnv = getMissingEnvVars(currentPlugin.requiredEnv);
 	const lines = [
 		`${currentPlugin.name} is online.`,

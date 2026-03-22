@@ -24,6 +24,7 @@ export interface SelfModifyToolCall {
 
 export interface SelfModifySessionDocument {
 	_id?: ObjectId;
+	pluginId: string;
 	sessionId: string;
 	sessionKey: string;
 	guildId: string;
@@ -52,6 +53,9 @@ function getCollection(database: SmediaMongoDatabase): Collection<SelfModifySess
 
 export async function ensureSelfModifyIndexes(database: SmediaMongoDatabase): Promise<void> {
 	const collection = getCollection(database);
+	await Promise.allSettled([
+		collection.dropIndex("channel_state_updatedAt"),
+	]);
 	await collection.createIndexes([
 		{
 			key: { sessionId: 1 },
@@ -59,8 +63,8 @@ export async function ensureSelfModifyIndexes(database: SmediaMongoDatabase): Pr
 			unique: true,
 		},
 		{
-			key: { channelId: 1, state: 1, updatedAt: -1 },
-			name: "channel_state_updatedAt",
+			key: { pluginId: 1, channelId: 1, state: 1, updatedAt: -1 },
+			name: "plugin_channel_state_updatedAt",
 		},
 		{
 			key: { createdAt: 1 },
@@ -73,6 +77,7 @@ export async function ensureSelfModifyIndexes(database: SmediaMongoDatabase): Pr
 export async function createSelfModifySession(
 	database: SmediaMongoDatabase,
 	input: {
+		pluginId: string;
 		sessionId: string;
 		sessionKey: string;
 		guildId: string;
@@ -86,6 +91,7 @@ export async function createSelfModifySession(
 ): Promise<SelfModifySessionDocument> {
 	const now = new Date();
 	const document: SelfModifySessionDocument = {
+		pluginId: input.pluginId,
 		sessionId: input.sessionId,
 		sessionKey: input.sessionKey,
 		guildId: input.guildId,
@@ -114,10 +120,12 @@ export async function createSelfModifySession(
 
 export async function getActiveSelfModifySession(
 	database: SmediaMongoDatabase,
+	pluginId: string,
 	channelId: string,
 ): Promise<SelfModifySessionDocument | null> {
 	return getCollection(database).findOne(
 		{
+			pluginId,
 			channelId,
 			state: { $in: ["planning", "awaiting-approval", "executing", "building", "restarting"] as SelfModifyState[] },
 		},
@@ -134,8 +142,9 @@ export async function getSelfModifySessionById(
 
 export async function getRestartingSessions(
 	database: SmediaMongoDatabase,
+	pluginId: string,
 ): Promise<SelfModifySessionDocument[]> {
-	return getCollection(database).find({ state: "restarting" as SelfModifyState }).toArray();
+	return getCollection(database).find({ pluginId, state: "restarting" as SelfModifyState }).toArray();
 }
 
 export async function updateSelfModifyState(

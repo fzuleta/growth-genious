@@ -21,6 +21,7 @@ const MAX_SNIPPET_LENGTH = 1400;
 
 export async function retrieveDbRouteEvidence(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	guildId: string;
 	channelId: string;
@@ -36,25 +37,30 @@ export async function retrieveDbRouteEvidence(input: {
 	const [memorySnapshot, recentMessages, userMemoryEntries, sessionMemoryEntries, latestJobContext, jobs, keywordMessages] = await Promise.all([
 		getChatMemorySnapshot({
 			database: input.database,
+			pluginId: input.pluginId,
 			sessionKey: input.sessionKey,
 			userId: input.userId,
 		}),
 		listChatMessagesForMemoryWindow(input.database, {
+			pluginId: input.pluginId,
 			sessionKey: input.sessionKey,
 			kinds: ["chat", "command", "job-update", "status"],
 			limit: MAX_CHAT_MESSAGES,
 		}),
 		listMemoryEntries(input.database, {
+			pluginId: input.pluginId,
 			scope: "user",
 			userId: input.userId,
 			limit: MAX_MEMORY_ENTRIES,
 		}),
 		listMemoryEntries(input.database, {
+			pluginId: input.pluginId,
 			scope: "session",
 			sessionKey: input.sessionKey,
 			limit: MAX_MEMORY_ENTRIES,
 		}),
 		getLatestJobContext(input.database, {
+			pluginId: input.pluginId,
 			sessionKey: input.sessionKey,
 		}),
 		loadRelevantJobs(input),
@@ -139,17 +145,22 @@ export async function retrieveDbRouteEvidence(input: {
 
 async function loadRelevantJobs(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	guildId: string;
 	channelId: string;
 	userId: string;
 	decision: ChatRouteDecision;
 }): Promise<GenerationJobDocument[]> {
 	if (input.decision.entityHints.jobId) {
-		const matched = await getGenerationJobById(input.database, input.decision.entityHints.jobId);
+		const matched = await getGenerationJobById(input.database, {
+			pluginId: input.pluginId,
+			jobId: input.decision.entityHints.jobId,
+		});
 		return matched ? [matched] : [];
 	}
 
 	const jobs = await listRecentGenerationJobs(input.database, {
+		pluginId: input.pluginId,
 		requestedByUserId: input.userId,
 		guildId: input.guildId,
 		channelId: input.channelId,
@@ -166,6 +177,7 @@ async function loadRelevantJobs(input: {
 	}
 
 	return listRecentGenerationJobs(input.database, {
+		pluginId: input.pluginId,
 		guildId: input.guildId,
 		channelId: input.channelId,
 		limit: MAX_JOBS,
@@ -174,6 +186,7 @@ async function loadRelevantJobs(input: {
 
 async function searchKeywordMessages(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	decision: ChatRouteDecision;
 }): Promise<ChatMessageDocument[]> {
@@ -182,6 +195,7 @@ async function searchKeywordMessages(input: {
 	}
 
 	return searchChatMessages(input.database, {
+		pluginId: input.pluginId,
 		sessionKey: input.sessionKey,
 		keywords: input.decision.entityHints.topicKeywords,
 		kinds: ["chat", "command", "job-update", "status"],

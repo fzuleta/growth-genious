@@ -51,6 +51,7 @@ function getAgentModel(): string {
 
 export interface SelfModifyStartInput {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	guildId: string;
 	channelId: string;
 	userId: string;
@@ -66,9 +67,13 @@ export interface SelfModifyResult {
 }
 
 export async function startSelfModifySession(input: SelfModifyStartInput): Promise<SelfModifyResult> {
-	const sessionKey = buildChatSessionKey({ guildId: input.guildId, channelId: input.channelId });
+	const sessionKey = buildChatSessionKey({
+		pluginId: input.pluginId,
+		guildId: input.guildId,
+		channelId: input.channelId,
+	});
 
-	const existing = await getActiveSelfModifySession(input.database, input.channelId);
+	const existing = await getActiveSelfModifySession(input.database, input.pluginId, input.channelId);
 	if (existing) {
 		return {
 			error: `There is already an active self-modify session (${existing.sessionId}, state=${existing.state}). Cancel it first or wait for it to complete.`,
@@ -87,6 +92,7 @@ export async function startSelfModifySession(input: SelfModifyStartInput): Promi
 	let session: SelfModifySessionDocument | null = null;
 	try {
 		session = await createSelfModifySession(input.database, {
+			pluginId: input.pluginId,
 			sessionId: randomUUID(),
 			sessionKey,
 			guildId: input.guildId,
@@ -181,9 +187,12 @@ export async function triggerVeilRestart(): Promise<string> {
 	return result.output;
 }
 
-export async function checkPostRestartSessions(database: SmediaMongoDatabase): Promise<SelfModifySessionDocument[]> {
+export async function checkPostRestartSessions(
+	database: SmediaMongoDatabase,
+	pluginId: string,
+): Promise<SelfModifySessionDocument[]> {
 	const { getRestartingSessions } = await import("./db/self-modify-mongo");
-	const sessions = await getRestartingSessions(database);
+	const sessions = await getRestartingSessions(database, pluginId);
 	for (const session of sessions) {
 		await updateSelfModifyState(database, session.sessionId, "completed");
 	}

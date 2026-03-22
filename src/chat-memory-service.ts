@@ -29,17 +29,20 @@ export interface ChatMemorySnapshot {
 
 export async function getChatMemorySnapshot(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	userId: string;
 }): Promise<ChatMemorySnapshot> {
 	const [shortTermSummaries, longTermProfile] = await Promise.all([
 		listMemoryEntries(input.database, {
+			pluginId: input.pluginId,
 			kinds: ["short-term-summary"],
 			scope: "session",
 			sessionKey: input.sessionKey,
 			limit: SHORT_TERM_PROMPT_LIMIT,
 		}),
 		getLatestMemoryEntry(input.database, {
+			pluginId: input.pluginId,
 			kinds: ["long-term-profile"],
 			scope: "user",
 			userId: input.userId,
@@ -54,6 +57,7 @@ export async function getChatMemorySnapshot(input: {
 
 export async function formatMemoryInspect(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	sessionKey: string;
 	userId: string;
 }): Promise<string> {
@@ -100,6 +104,7 @@ function formatRelativeAge(date: Date): string {
 
 export async function runChatMemoryConsolidationCycle(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 }): Promise<{
 	processedSessionCount: number;
 	updatedShortTermCount: number;
@@ -110,6 +115,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const sessions = await input.database.collections.chatSessions
 		.find({
+			pluginId: input.pluginId,
 			messageCount: { $gt: 0 },
 			$or: [
 				{ lastConsolidatedAt: { $exists: false } },
@@ -130,6 +136,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 		try {
 			const result = await consolidateSessionMemory({
 				database: input.database,
+				pluginId: input.pluginId,
 				contextMarkdown,
 				sessionKey: session.sessionKey,
 				guildId: session.guildId,
@@ -140,6 +147,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 			if (result.sessionConsolidatedAt) {
 				await markSessionConsolidated(
 					input.database,
+					input.pluginId,
 					session.sessionKey,
 					result.sessionConsolidatedAt,
 				);
@@ -181,6 +189,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 
 async function consolidateSessionMemory(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	contextMarkdown: string | null;
 	sessionKey: string;
 	guildId: string;
@@ -193,10 +202,12 @@ async function consolidateSessionMemory(input: {
 	sessionConsolidatedAt: Date | null;
 }> {
 	const checkpoint = await getMemoryCheckpoint(input.database, {
+		pluginId: input.pluginId,
 		kind: "session-short-term",
 		sessionKey: input.sessionKey,
 	});
 	const sourceWindow = await listChatMessagesForMemoryWindow(input.database, {
+		pluginId: input.pluginId,
 		sessionKey: input.sessionKey,
 		kinds: ["chat"],
 		afterCreatedAt: checkpoint?.lastParsedMessageAt ?? undefined,
@@ -209,6 +220,7 @@ async function consolidateSessionMemory(input: {
 
 	if (sourceMessages.length === 0) {
 		await upsertMemoryCheckpoint(input.database, {
+			pluginId: input.pluginId,
 			kind: "session-short-term",
 			sessionKey: input.sessionKey,
 			guildId: input.guildId,
@@ -231,6 +243,7 @@ async function consolidateSessionMemory(input: {
 	}
 
 	const latestShortTerm = await getLatestMemoryEntry(input.database, {
+		pluginId: input.pluginId,
 		kinds: ["short-term-summary"],
 		scope: "session",
 		sessionKey: input.sessionKey,
@@ -254,6 +267,7 @@ async function consolidateSessionMemory(input: {
 	const participants = collectParticipants(sourceMessages);
 
 	await upsertMemoryEntry(input.database, {
+		pluginId: input.pluginId,
 		kind: "short-term-summary",
 		scope: "session",
 		sessionKey: input.sessionKey,
@@ -272,6 +286,7 @@ async function consolidateSessionMemory(input: {
 	});
 
 	await upsertMemoryCheckpoint(input.database, {
+		pluginId: input.pluginId,
 		kind: "session-short-term",
 		sessionKey: input.sessionKey,
 		guildId: input.guildId,
@@ -289,6 +304,7 @@ async function consolidateSessionMemory(input: {
 	for (const [userId, username] of participants.entries()) {
 		const updated = await maybeRefreshLongTermProfileForUser({
 			database: input.database,
+			pluginId: input.pluginId,
 			contextMarkdown: input.contextMarkdown,
 			userId,
 			username,
@@ -311,6 +327,7 @@ async function consolidateSessionMemory(input: {
 
 async function maybeRefreshLongTermProfileForUser(input: {
 	database: SmediaMongoDatabase;
+	pluginId: string;
 	contextMarkdown: string | null;
 	userId: string;
 	username: string;
@@ -319,11 +336,13 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	channelId: string;
 }): Promise<boolean> {
 	const checkpoint = await getMemoryCheckpoint(input.database, {
+		pluginId: input.pluginId,
 		kind: "user-long-term",
 		userId: input.userId,
 	});
 	const sourceMessages = await input.database.collections.chatMessages
 		.find({
+			pluginId: input.pluginId,
 			kind: "chat",
 			$or: [
 				{ authorRole: "user", userId: input.userId },
@@ -344,6 +363,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	}
 
 	const latestProfile = await getLatestMemoryEntry(input.database, {
+		pluginId: input.pluginId,
 		kinds: ["long-term-profile"],
 		scope: "user",
 		userId: input.userId,
@@ -368,6 +388,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	const createdAt = sourceMessages[sourceMessages.length - 1]?.createdAt ?? new Date();
 
 	await upsertMemoryEntry(input.database, {
+		pluginId: input.pluginId,
 		kind: "long-term-profile",
 		scope: "user",
 		guildId: input.guildId,
@@ -385,6 +406,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	});
 
 	await upsertMemoryCheckpoint(input.database, {
+		pluginId: input.pluginId,
 		kind: "user-long-term",
 		guildId: input.guildId,
 		channelId: input.channelId,
