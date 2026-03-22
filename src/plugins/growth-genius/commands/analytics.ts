@@ -1,6 +1,6 @@
 import { createSign } from "node:crypto";
 import path from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type { PluginCommand } from "../../../plugin-contract";
 
 const ANALYTICS_REQUIRED_ENV = [
@@ -26,7 +26,7 @@ interface JsonObject {
 	[key: string]: JsonValue;
 }
 
-type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime" | "preset";
+type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime" | "preset" | "explore";
 
 interface AnalyticsDateRange {
 	label: string;
@@ -101,6 +101,7 @@ interface AnalyticsOperationRequest {
 	adminResource?: string;
 	payload?: JsonObject;
 	presetName?: string;
+	exploreName?: string;
 }
 
 interface AnalyticsExecutionResult {
@@ -357,6 +358,7 @@ export const analyticsCommand: PluginCommand = {
 		const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
 		const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
 		const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
+		const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
 		const operation = parseAnalyticsOperation(input.args);
 
 		const accessToken = await getGoogleAccessToken({
@@ -368,6 +370,7 @@ export const analyticsCommand: PluginCommand = {
 			propertyId,
 			accessToken,
 			operation,
+			exploreDir,
 		});
 
 		const requestedAt = new Date().toISOString();
@@ -471,6 +474,18 @@ function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 				kind: operationName,
 				payload: parseJsonPayload(operationName, remainder),
 			};
+		case "explore": {
+			const exploreName = restTokens[0];
+			if (!exploreName) {
+				throw new Error("Missing explore name. Usage: /analytics explore <name> [date]. Files are loaded from apps/growth-genius/data/explore/<name>.json.");
+			}
+			const exploreDateArgs = restTokens.slice(1).join(" ").trim();
+			return {
+				kind: "explore",
+				exploreName,
+				dateRange: exploreDateArgs ? parseAnalyticsDateRange(exploreDateArgs) : buildTrailingDayRange(DEFAULT_LOOKBACK_DAYS),
+			};
+		}
 		default: {
 			if (operationName in PRESET_REPORT_CONFIG) {
 				return {
@@ -511,10 +526,11 @@ async function executeAnalyticsOperation(input: {
 	propertyId: string;
 	accessToken: string;
 	operation: AnalyticsOperationRequest;
+	exploreDir: string;
 }): Promise<AnalyticsExecutionResult> {
 	switch (input.operation.kind) {
 		case "help":
-			return buildHelpExecutionResult();
+			return await buildHelpExecutionResult(input.exploreDir);
 		case "legacy-report":
 			return await executeLegacyReport(input.propertyId, input.accessToken, input.operation.dateRange!);
 		case "metadata":
@@ -531,13 +547,32 @@ async function executeAnalyticsOperation(input: {
 			return await executeRealtimeRequest(input.propertyId, input.accessToken, input.operation.payload!);
 		case "preset":
 			return await executePresetRequest(input.propertyId, input.accessToken, input.operation.presetName!, input.operation.dateRange!);
+		case "explore":
+			return await executeExploreRequest(input.propertyId, input.accessToken, input.operation.exploreName!, input.operation.dateRange!, input.exploreDir);
 	}
 }
 
-function buildHelpExecutionResult(): AnalyticsExecutionResult {
+async function buildHelpExecutionResult(exploreDir: string): Promise<AnalyticsExecutionResult> {
 	const presetList = Object.entries(PRESET_REPORT_CONFIG)
 		.map(([name, config]) => `- \`/analytics ${name}\` — ${config.description}`)
 		.join("\n");
+
+	const savedExplores = await listSavedExplores(exploreDir);
+	const exploreSection = savedExplores.length > 0
+		? [
+			"## Custom explores (saved reports)",
+			"",
+			...savedExplores.map((name) => `- \`/analytics explore ${name}\``),
+			"",
+			`Files in \`${path.relative(process.cwd(), exploreDir)}/\`. Add any \`.json\` file with a GA4 report body.`,
+			"",
+		]
+		: [
+			"## Custom explores (saved reports)",
+			"",
+			`No saved explores found. Add \`.json\` files in \`${path.relative(process.cwd(), exploreDir)}/\`.`,
+			"",
+		];
 
 	const summaryMarkdown = [
 		"# Analytics Command Help",
@@ -548,6 +583,7 @@ function buildHelpExecutionResult(): AnalyticsExecutionResult {
 		"",
 		"All presets default to the last 7 days. Add a date range: `/analytics events 30d` or `/analytics pages 2026-03-01 2026-03-21`.",
 		"",
+		...exploreSection,
 		"## Preserved default report",
 		"",
 		"- `/analytics`",
@@ -578,6 +614,7 @@ function buildHelpExecutionResult(): AnalyticsExecutionResult {
 		reply: [
 			"/analytics help",
 			`presets=${Object.keys(PRESET_REPORT_CONFIG).join(",")}`,
+			`explores=${savedExplores.join(",") || "none"}`,
 			"legacyReport=true",
 			"metadata=true",
 			`adminResources=${Object.keys(ADMIN_RESOURCE_CONFIG).join(",")}`,
@@ -1094,6 +1131,137 @@ async function executeCohortPreset(
 	};
 }
 
+async function executeExploreRequest(
+	propertyId: string,
+	accessToken: string,
+	exploreName: string,
+	dateRange: AnalyticsDateRange,
+	exploreDir: string,
+): Promise<AnalyticsExecutionResult> {
+	const definition = await loadExploreDefinition(exploreDir, exploreName);
+	const apiKind = typeof definition.kind === "string" ? definition.kind : "report";
+	const requestBody: JsonObject = { ...cloneJsonObject(definition) };
+	delete requestBody.kind;
+	delete requestBody.name;
+	delete requestBody.description;
+
+	const dateRanges = [{ startDate: dateRange.startDate, endDate: dateRange.endDate }] as JsonValue;
+	if (!Array.isArray(requestBody.dateRanges)) {
+		requestBody.dateRanges = dateRanges;
+	}
+
+	const displayName = typeof definition.name === "string" ? definition.name : exploreName;
+	const description = typeof definition.description === "string" ? definition.description : "";
+
+	let apiPath: string;
+	let apiBase: string;
+	switch (apiKind) {
+		case "pivot":
+			apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+			apiPath = `/properties/${propertyId}:runPivotReport`;
+			break;
+		case "funnel":
+			apiBase = GOOGLE_ANALYTICS_DATA_API_ALPHA_BASE;
+			apiPath = `/properties/${propertyId}:runFunnelReport`;
+			break;
+		case "realtime":
+			apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+			apiPath = `/properties/${propertyId}:runRealtimeReport`;
+			break;
+		default:
+			apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+			apiPath = `/properties/${propertyId}:runReport`;
+			break;
+	}
+
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase,
+		path: apiPath,
+		accessToken,
+		body: requestBody,
+	});
+
+	const rowCount = report.rowCount ?? report.rows?.length ?? 0;
+	const topEntries = buildTopRowsPreview(report, 15);
+
+	const summaryMarkdown = [
+		`# Explore: ${displayName}`,
+		"",
+		`- property: ${propertyId}`,
+		`- range: ${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+		`- api: ${apiKind}`,
+		...(description ? [`- description: ${description}`] : []),
+		`- rows: ${rowCount}`,
+		"",
+		"## Results",
+		"",
+		...topEntries,
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics explore ${exploreName} for property ${propertyId}.`,
+			`name=${displayName}`,
+			`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+			`api=${apiKind}`,
+			`rows=${rowCount}`,
+			"",
+			"## Results",
+			"",
+			...topEntries,
+		].join("\n"),
+		requestPayload: { kind: "explore", explore: exploreName, api: apiKind, request: requestBody },
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+		legacyReportArtifact: report as JsonObject,
+	};
+}
+
+async function loadExploreDefinition(exploreDir: string, name: string): Promise<JsonObject> {
+	const safeName = path.basename(name).replace(/\.json$/i, "");
+	const filePath = path.join(exploreDir, `${safeName}.json`);
+	const resolved = path.resolve(filePath);
+	if (!resolved.startsWith(path.resolve(exploreDir))) {
+		throw new Error(`Invalid explore name '${name}'.`);
+	}
+
+	let content: string;
+	try {
+		content = await readFile(resolved, "utf8");
+	} catch {
+		const available = await listSavedExplores(exploreDir);
+		const hint = available.length > 0
+			? `Available explores: ${available.join(", ")}.`
+			: `No explores found in ${path.relative(process.cwd(), exploreDir)}/. Add a .json file to get started.`;
+		throw new Error(`Explore '${safeName}' not found at ${path.relative(process.cwd(), resolved)}. ${hint}`);
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch {
+		throw new Error(`Invalid JSON in explore file '${safeName}.json'.`);
+	}
+
+	if (!isJsonObject(parsed)) {
+		throw new Error(`Explore file '${safeName}.json' must contain a JSON object.`);
+	}
+
+	return parsed;
+}
+
+async function listSavedExplores(exploreDir: string): Promise<string[]> {
+	try {
+		const entries = await readdir(exploreDir);
+		return entries
+			.filter((entry) => entry.endsWith(".json"))
+			.map((entry) => entry.replace(/\.json$/i, ""))
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
 function buildTopRowsPreview(report: GoogleAnalyticsReportResponse, limit: number): string[] {
 	const rows = report.rows ?? [];
 	if (rows.length === 0) {
@@ -1593,6 +1761,7 @@ function buildHelpText(): string {
 		"- '/analytics 30d'",
 		"- '/analytics 2026-03-01 2026-03-21'",
 		`- '/analytics <preset> [date]' where <preset> is one of: ${presetNames}`,
+		"- '/analytics explore <name> [date]' — load a saved report from apps/growth-genius/data/explore/<name>.json",
 		"- '/analytics metadata [search]'",
 		`- '/analytics admin <resource>' where <resource> is one of ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}`,
 		"- '/analytics report {json}'",

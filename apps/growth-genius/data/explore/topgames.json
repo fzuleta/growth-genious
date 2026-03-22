@@ -1,0 +1,30 @@
+{
+	"name": "Top Games",
+	"description": "Custom overview: top pages, events, and engagement metrics for the last period.",
+	"dimensions": [
+		{ "name": "totalbet_in_credits_dim" },
+		{ "name": "model_id" },
+		{ "name": "Date" },
+		{ "name": "eventName" },
+		{ "name": "credits" },
+		{ "name": "spin_bucket" },
+		{ "name": "package_id" },
+		{ "name": "error_type" }
+	],
+	"metrics": [
+		{ "name": "totalbet_in_credits" },
+		{ "name": "value" },
+		{ "name": "spins_so_far" },
+		{ "name": "elapsed_ms" },
+		{ "name": "eventCount" },
+		{ "name": "activeUsers" },
+		{ "name": "newUsers" },
+		{ "name": "engagedSessions" },
+		{ "name": "engagementRate" }
+	],
+	"orderBys": [
+		{ "metric": { "metricName": "model_id" }, "desc": true }
+	],
+	"metricAggregations": ["TOTAL"],
+	"limit": "30"
+}
