@@ -238,6 +238,49 @@ const PRESET_REPORT_CONFIG: Record<string, PresetReportDefinition> = {
 			limit: "30",
 		},
 	},
+	cohort: {
+		label: "Cohort Retention",
+		description: "Weekly cohort retention analysis — how many users come back after their first visit (Explore-style).",
+		request: {},
+	},
+	journeys: {
+		label: "User Journeys",
+		description: "Landing page → second page sequences to approximate path exploration.",
+		request: {
+			dimensions: [
+				{ name: "landingPagePlusQueryString" },
+				{ name: "pagePath" },
+			],
+			metrics: [
+				{ name: "sessions" },
+				{ name: "activeUsers" },
+				{ name: "engagementRate" },
+			],
+			orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+			metricAggregations: ["TOTAL"],
+			limit: "40",
+		},
+	},
+	engagement: {
+		label: "Engagement Deep-Dive",
+		description: "Session engagement breakdown: engaged sessions, duration, events per session, and key event rates.",
+		request: {
+			dimensions: [{ name: "date" }],
+			metrics: [
+				{ name: "engagedSessions" },
+				{ name: "engagementRate" },
+				{ name: "averageSessionDuration" },
+				{ name: "screenPageViewsPerSession" },
+				{ name: "eventCountPerUser" },
+				{ name: "sessionsPerUser" },
+				{ name: "bounceRate" },
+				{ name: "dauPerMau" },
+			],
+			orderBys: [{ dimension: { dimensionName: "date", orderType: "ALPHANUMERIC" } }],
+			metricAggregations: ["TOTAL"],
+			limit: "90",
+		},
+	},
 };
 
 const ADMIN_RESOURCE_CONFIG: Record<string, AdminResourceConfig> = {
@@ -848,6 +891,10 @@ async function executePresetRequest(
 		return await executeOverviewPreset(propertyId, accessToken, dateRange);
 	}
 
+	if (presetName === "cohort") {
+		return await executeCohortPreset(propertyId, accessToken, dateRange);
+	}
+
 	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
 		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
 		path: `/properties/${propertyId}:runReport`,
@@ -959,6 +1006,91 @@ async function executeOverviewPreset(
 		},
 		summaryMarkdown,
 		legacyReportArtifact: mainReport as JsonObject,
+	};
+}
+
+async function executeCohortPreset(
+	propertyId: string,
+	accessToken: string,
+	dateRange: AnalyticsDateRange,
+): Promise<AnalyticsExecutionResult> {
+	const daySpan = Math.max(1, Math.ceil(
+		(new Date(dateRange.endDate).getTime() - new Date(dateRange.startDate).getTime()) / (1000 * 60 * 60 * 24),
+	));
+	const granularity = daySpan <= 14 ? "DAILY" : "WEEKLY";
+
+	const nthDimension = granularity === "WEEKLY" ? "cohortNthWeek" : "cohortNthDay";
+	const endOffset = granularity === "WEEKLY" ? Math.max(1, Math.floor(daySpan / 7)) : daySpan;
+
+	const cohortRequest: JsonObject = {
+		dimensions: [{ name: "cohort" }, { name: nthDimension }],
+		metrics: [{ name: "cohortActiveUsers" }, { name: "cohortTotalUsers" }],
+		cohortSpec: {
+			cohorts: [
+				{
+					name: "all_users",
+					dimension: "firstSessionDate",
+					dateRange: { startDate: dateRange.startDate, endDate: dateRange.endDate },
+				},
+			],
+			cohortsRange: {
+				granularity,
+				endOffset,
+			},
+			cohortReportSettings: { accumulate: false },
+		},
+	};
+
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runReport`,
+		accessToken,
+		body: cohortRequest,
+	});
+
+	const rows = report.rows ?? [];
+	const retentionEntries: string[] = [];
+	for (const row of rows) {
+		const period = row.dimensionValues?.[1]?.value ?? "?";
+		const activeUsers = Number(row.metricValues?.[0]?.value ?? 0);
+		const totalUsers = Number(row.metricValues?.[1]?.value ?? 1);
+		const retentionRate = totalUsers > 0 ? ((activeUsers / totalUsers) * 100).toFixed(1) : "0.0";
+		const periodLabel = granularity === "WEEKLY" ? `Week ${period}` : `Day ${period}`;
+		retentionEntries.push(`- ${periodLabel}: ${activeUsers.toLocaleString("en-US")} / ${totalUsers.toLocaleString("en-US")} (${retentionRate}%)`);
+	}
+
+	if (retentionEntries.length === 0) {
+		retentionEntries.push("- no cohort data available for this range");
+	}
+
+	const summaryMarkdown = [
+		"# Analytics Explore: Cohort Retention",
+		"",
+		`- property: ${propertyId}`,
+		`- range: ${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+		`- granularity: ${granularity.toLowerCase()}`,
+		`- periods: ${rows.length}`,
+		"",
+		"## Retention by Period",
+		"",
+		...retentionEntries,
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics cohort for property ${propertyId}.`,
+			`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+			`granularity=${granularity.toLowerCase()}`,
+			`periods=${rows.length}`,
+			"",
+			"## Retention",
+			"",
+			...retentionEntries,
+		].join("\n"),
+		requestPayload: { kind: "preset", preset: "cohort", request: cohortRequest },
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+		legacyReportArtifact: report as JsonObject,
 	};
 }
 
