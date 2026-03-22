@@ -2,6 +2,7 @@ import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type { PluginCommand, PluginRouteRequest } from "../../../plugin-contract";
+import { createOpenAIClient } from "../../../openai/openai";
 
 const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
 
@@ -28,7 +29,7 @@ interface JsonObject {
 	[key: string]: JsonValue;
 }
 
-type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime" | "preset" | "explore";
+type AnalyticsOperationKind = "help" | "legacy-report" | "comprehensive" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime" | "preset" | "explore";
 
 interface AnalyticsDateRange {
 	label: string;
@@ -442,7 +443,7 @@ function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 	const trimmed = args.trim();
 	if (!trimmed) {
 		return {
-			kind: "legacy-report",
+			kind: "comprehensive",
 			dateRange: buildTrailingDayRange(DEFAULT_LOOKBACK_DAYS),
 		};
 	}
@@ -547,6 +548,8 @@ async function executeAnalyticsOperation(input: {
 	switch (input.operation.kind) {
 		case "help":
 			return await buildHelpExecutionResult(input.exploreDir);
+		case "comprehensive":
+			return await executeComprehensiveReport(input.propertyId, input.accessToken, input.operation.dateRange!, input.exploreDir);
 		case "legacy-report":
 			return await executeLegacyReport(input.propertyId, input.accessToken, input.operation.dateRange!);
 		case "metadata":
@@ -602,9 +605,9 @@ async function buildHelpExecutionResult(exploreDir: string): Promise<AnalyticsEx
 		...exploreSection,
 		"## Preserved default report",
 		"",
-		"- `/analytics`",
-		"- `/analytics 30d`",
-		"- `/analytics 2026-03-01 2026-03-21`",
+		"- `/analytics` — comprehensive report: overview + all explores + AI summary (7d default)",
+		"- `/analytics 30d` — legacy date-only report",
+		"- `/analytics 2026-03-01 2026-03-21` — legacy custom-range report",
 		"",
 		"## Discovery",
 		"",
@@ -641,6 +644,212 @@ async function buildHelpExecutionResult(exploreDir: string): Promise<AnalyticsEx
 		responsePayload: { help: summaryMarkdown },
 		summaryMarkdown,
 	};
+}
+
+async function executeComprehensiveReport(
+	propertyId: string,
+	accessToken: string,
+	dateRange: AnalyticsDateRange,
+	exploreDir: string,
+): Promise<AnalyticsExecutionResult> {
+	const dateRanges = [{ startDate: dateRange.startDate, endDate: dateRange.endDate }];
+
+	// Run overview preset reports in parallel
+	const [mainReport, eventsReport, pagesReport, sourcesReport, engagementReport] = await Promise.all([
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.overview.request), dateRanges },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.events.request), dateRanges, limit: "25" },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.pages.request), dateRanges, limit: "15" },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.sources.request), dateRanges, limit: "15" },
+		}),
+		runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+			apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+			path: `/properties/${propertyId}:runReport`,
+			accessToken,
+			body: { ...cloneJsonObject(PRESET_REPORT_CONFIG.engagement.request), dateRanges },
+		}),
+	]);
+
+	// Run all saved explores in parallel
+	const exploreNames = await listSavedExplores(exploreDir);
+	const exploreResults: Array<{ name: string; report: GoogleAnalyticsReportResponse; definition: JsonObject }> = [];
+	if (exploreNames.length > 0) {
+		const explorePromises = exploreNames.map(async (name) => {
+			const definition = await loadExploreDefinition(exploreDir, name);
+			const apiKind = typeof definition.kind === "string" ? definition.kind : "report";
+			const requestBody: JsonObject = { ...cloneJsonObject(definition) };
+			delete requestBody.kind;
+			delete requestBody.name;
+			delete requestBody.description;
+			if (!Array.isArray(requestBody.dateRanges)) {
+				requestBody.dateRanges = dateRanges as JsonValue;
+			}
+
+			let apiBase: string;
+			let apiPath: string;
+			switch (apiKind) {
+				case "pivot":
+					apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+					apiPath = `/properties/${propertyId}:runPivotReport`;
+					break;
+				case "funnel":
+					apiBase = GOOGLE_ANALYTICS_DATA_API_ALPHA_BASE;
+					apiPath = `/properties/${propertyId}:runFunnelReport`;
+					break;
+				case "realtime":
+					apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+					apiPath = `/properties/${propertyId}:runRealtimeReport`;
+					break;
+				default:
+					apiBase = GOOGLE_ANALYTICS_DATA_API_BETA_BASE;
+					apiPath = `/properties/${propertyId}:runReport`;
+					break;
+			}
+
+			const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+				apiBase,
+				path: apiPath,
+				accessToken,
+				body: requestBody,
+			});
+
+			return { name, report, definition };
+		});
+		exploreResults.push(...await Promise.all(explorePromises));
+	}
+
+	// Build data summary sections for AI
+	const mainSummary = buildReportSummary(mainReport, dateRange, propertyId, "Overview");
+	const dataSections: string[] = [
+		mainSummary.markdown,
+		"",
+		"## Top Events",
+		"",
+		...buildTopRowsPreview(eventsReport, 25),
+		"",
+		"## Top Pages",
+		"",
+		...buildTopRowsPreview(pagesReport, 15),
+		"",
+		"## Top Traffic Sources",
+		"",
+		...buildTopRowsPreview(sourcesReport, 15),
+		"",
+		"## Engagement Trends",
+		"",
+		...buildTopRowsPreview(engagementReport, 14),
+	];
+
+	for (const explore of exploreResults) {
+		const displayName = typeof explore.definition.name === "string" ? explore.definition.name : explore.name;
+		const description = typeof explore.definition.description === "string" ? ` — ${explore.definition.description}` : "";
+		dataSections.push(
+			"",
+			`## Explore: ${displayName}${description}`,
+			"",
+			...buildTopRowsPreview(explore.report, 20),
+		);
+	}
+
+	const analyticsDataMarkdown = dataSections.join("\n");
+
+	// Send to OpenAI for summary and recommendations
+	const aiSummary = await generateComprehensiveAISummary(analyticsDataMarkdown, dateRange);
+
+	const summaryMarkdown = [
+		`# Comprehensive Analytics Report`,
+		"",
+		`- property: ${propertyId}`,
+		`- range: ${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+		`- presets: overview, events, pages, sources, engagement`,
+		`- explores: ${exploreNames.length > 0 ? exploreNames.join(", ") : "none"}`,
+		"",
+		"---",
+		"",
+		aiSummary,
+		"",
+		"---",
+		"",
+		"# Raw Data",
+		"",
+		analyticsDataMarkdown,
+	].join("\n");
+
+	return {
+		reply: aiSummary,
+		requestPayload: {
+			kind: "comprehensive",
+			dateRange: serializeDateRange(dateRange),
+			presets: ["overview", "events", "pages", "sources", "engagement"],
+			explores: exploreNames,
+		},
+		responsePayload: {
+			mainReport: mainReport as JsonObject,
+			eventsReport: eventsReport as JsonObject,
+			pagesReport: pagesReport as JsonObject,
+			sourcesReport: sourcesReport as JsonObject,
+			engagementReport: engagementReport as JsonObject,
+			explores: Object.fromEntries(exploreResults.map((e) => [e.name, e.report as JsonObject])),
+		},
+		summaryMarkdown,
+		legacyReportArtifact: mainReport as JsonObject,
+	};
+}
+
+async function generateComprehensiveAISummary(analyticsData: string, dateRange: AnalyticsDateRange): Promise<string> {
+	const client = createOpenAIClient();
+	const model = process.env.OPENAI_ANALYTICS_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-4o";
+
+	const response = await client.responses.create({
+		model,
+		input: [
+			{
+				role: "system",
+				content: [
+					"You are a senior growth analyst. The user will provide Google Analytics 4 data from the last reporting period.",
+					"Your job is to produce a concise, actionable report in Markdown with:",
+					"1. **Executive Summary** — 2-3 sentence high-level takeaway.",
+					"2. **Key Metrics** — highlight the most important numbers (users, sessions, engagement, bounce rate, top events).",
+					"3. **Trends & Patterns** — what changed, what stands out, any anomalies.",
+					"4. **Top Content & Sources** — which pages and traffic sources are performing well or poorly.",
+					"5. **Custom Explore Insights** — insights from any custom explore data included.",
+					"6. **Recommendations** — 3-5 concrete, prioritized actions to improve growth.",
+					"",
+					"Be specific with numbers. Reference actual data points. Keep it concise but thorough.",
+					"Format for Discord (Markdown). Do not exceed 1800 characters in total.",
+				].join("\n"),
+			},
+			{
+				role: "user",
+				content: `Here is the analytics data (${dateRange.label}, ${dateRange.startDate} to ${dateRange.endDate}):\n\n${analyticsData}`,
+			},
+		],
+	});
+
+	const text = response.output_text.trim();
+	if (!text) {
+		return "*AI summary unavailable — OpenAI returned an empty response.*";
+	}
+
+	return text;
 }
 
 async function executeLegacyReport(propertyId: string, accessToken: string, dateRange: AnalyticsDateRange): Promise<AnalyticsExecutionResult> {
