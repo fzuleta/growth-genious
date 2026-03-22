@@ -1,7 +1,9 @@
 import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import type { PluginCommand } from "../../../plugin-contract";
+import type { PluginCommand, PluginRouteRequest } from "../../../plugin-contract";
+
+const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
 
 const ANALYTICS_REQUIRED_ENV = [
 	"GOOGLE_ANALYTICS_PROPERTY_ID",
@@ -351,6 +353,20 @@ export const analyticsCommand: PluginCommand = {
 	name: "analytics",
 	description: "Fetch GA4 metadata, reports, pivots, funnels, realtime data, and admin resources for the growth-genius plugin.",
 	requiredEnv: ANALYTICS_REQUIRED_ENV,
+	match: (input: PluginRouteRequest) => {
+		const trimmed = input.content.trim();
+		const lower = trimmed.toLowerCase();
+		for (const alias of ANALYTICS_COMMAND_ALIASES) {
+			const slash = `/${alias}`;
+			if (lower === slash) {
+				return { subject: "analytics", args: "", reason: "slash-command-alias-match" };
+			}
+			if (lower.startsWith(`${slash} `)) {
+				return { subject: "analytics", args: trimmed.slice(slash.length).trim(), reason: "slash-command-alias-match" };
+			}
+		}
+		return null;
+	},
 	handle: async (input) => {
 		const analyticsOutputDir = path.join(input.outputDir, "analytics");
 		await mkdir(analyticsOutputDir, { recursive: true });

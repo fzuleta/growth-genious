@@ -1,0 +1,27 @@
+{
+  "dimensions": [
+    { "name": "customEvent:model_id" }
+  ],
+  "metrics": [
+    { "name": "eventCount" },
+    { "name": "totalUsers" }
+  ],
+  "dimensionFilter": {
+    "filter": {
+      "fieldName": "eventName",
+      "stringFilter": {
+        "matchType": "EXACT",
+        "value": "game_bet"
+      }
+    }
+  },
+  "orderBys": [
+    {
+      "metric": {
+        "metricName": "eventCount"
+      },
+      "desc": true
+    }
+  ],
+  "limit": 60
+}

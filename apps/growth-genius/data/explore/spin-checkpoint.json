@@ -1,0 +1,40 @@
+{
+  "dimensions": [
+    { "name": "customEvent:model_id" },
+    { "name": "customEvent:credits" },
+    { "name": "customEvent:spin_bucket" }
+  ],
+  "metrics": [
+    { "name": "eventCount" },
+    { "name": "totalUsers" }
+  ],
+  "dimensionFilter": {
+    "filter": {
+      "fieldName": "eventName",
+      "stringFilter": {
+        "matchType": "EXACT",
+        "value": "spin_checkpoint"
+      }
+    }
+  },
+  "orderBys": [
+    {
+      "dimension": {
+        "dimensionName": "customEvent:model_id"
+      }
+    },
+    {
+      "dimension": {
+        "dimensionName": "customEvent:credits",
+        "orderType": "NUMERIC"
+      }
+    },
+    {
+      "dimension": {
+        "dimensionName": "customEvent:spin_bucket",
+        "orderType": "NUMERIC"
+      }
+    }
+  ],
+  "limit": 500
+}
