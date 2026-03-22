@@ -138,19 +138,29 @@ client.on("messageCreate", async (message) => {
 	}
 
 	if (content === MEMORY_REFRESH_COMMAND_PREFIX) {
-		await persistInboundDiscordMessage(mongoDatabase, message, "command");
+		await persistInboundDiscordMessage(mongoDatabase, message, "command", {
+			commandName: MEMORY_REFRESH_COMMAND_PREFIX,
+			memoryEligible: false,
+		});
 		const refreshReply = await runManualMemoryConsolidation();
 		await replyToMessage(
 			mongoDatabase,
 			message,
 			refreshReply,
 			"command",
+			{
+				commandName: MEMORY_REFRESH_COMMAND_PREFIX,
+				memoryEligible: false,
+			},
 		);
 		return;
 	}
 
 	if (content === MEMORY_INSPECT_COMMAND_PREFIX) {
-		await persistInboundDiscordMessage(mongoDatabase, message, "command");
+		await persistInboundDiscordMessage(mongoDatabase, message, "command", {
+			commandName: MEMORY_INSPECT_COMMAND_PREFIX,
+			memoryEligible: false,
+		});
 		try {
 			const inspectReply = await formatMemoryInspect({
 				database: mongoDatabase,
@@ -167,6 +177,10 @@ client.on("messageCreate", async (message) => {
 				message,
 				inspectReply,
 				"command",
+				{
+					commandName: MEMORY_INSPECT_COMMAND_PREFIX,
+					memoryEligible: false,
+				},
 			);
 		} catch (error: unknown) {
 			const messageText = error instanceof Error ? error.message : String(error);
@@ -187,12 +201,18 @@ client.on("messageCreate", async (message) => {
 			if (activeSession && activeSession.state === "awaiting-approval") {
 				const normalized = content.trim().toLowerCase();
 				if (/^(approve|go|yes|lgtm|do it|go ahead|ship it)$/i.test(normalized)) {
-					await persistInboundDiscordMessage(mongoDatabase, message, "command");
+					await persistInboundDiscordMessage(mongoDatabase, message, "command", {
+						commandName: "self-modify-approve",
+						memoryEligible: true,
+					});
 					await handleSelfModifyApproval(mongoDatabase, message, activeSession);
 					return;
 				}
 				if (/^(cancel|no|stop|abort|nevermind)$/i.test(normalized)) {
-					await persistInboundDiscordMessage(mongoDatabase, message, "command");
+					await persistInboundDiscordMessage(mongoDatabase, message, "command", {
+						commandName: "self-modify-cancel",
+						memoryEligible: true,
+					});
 					await handleSelfModifyCancel(mongoDatabase, message, activeSession);
 					return;
 				}
@@ -305,7 +325,21 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		}
 
 		if (routeDecision.route === "custom" && customRouteHandler) {
-			await persistInboundChatContent(database, lastMessage, combinedContent);
+			const customCommandName = routeDecision.entityHints?.customCommandName?.trim() || null;
+			const interactionKind: ChatMessageKind = customCommandName ? "command" : "chat";
+			await persistInboundChatContent(
+				database,
+				lastMessage,
+				combinedContent,
+				interactionKind,
+				customCommandName
+					? {
+						commandName: `/${customCommandName}`,
+						memoryEligible: true,
+						interactionType: "plugin-command",
+					}
+					: undefined,
+			);
 			const outputDir = await ensurePluginOutputDir(currentPlugin);
 			const customReply = await customRouteHandler({
 				plugin: currentPlugin,
@@ -317,7 +351,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 				outputDir,
 			});
 			if (customReply.trim().length > 0) {
-				await replyToMessage(database, lastMessage, customReply, "chat");
+				await replyToMessage(database, lastMessage, customReply, interactionKind);
 			}
 			return;
 		}
@@ -795,6 +829,7 @@ async function replyToMessage(
 	message: Message,
 	content: string,
 	kind: ChatMessageKind,
+	metadata?: Record<string, unknown>,
 ): Promise<void> {
 	const chunks = splitDiscordMessage(content);
 	for (const chunk of chunks) {
@@ -805,7 +840,7 @@ async function replyToMessage(
 			},
 		});
 
-		await persistOutboundDiscordMessage(database, message, sentMessage, kind);
+		await persistOutboundDiscordMessage(database, message, sentMessage, kind, metadata);
 	}
 }
 
@@ -842,6 +877,7 @@ async function persistInboundDiscordMessage(
 	database: SmediaMongoDatabase,
 	message: Message,
 	kind: ChatMessageKind,
+	metadata?: Record<string, unknown>,
 ): Promise<void> {
 	await appendChatMessage(database, {
 		pluginId: currentPlugin.id,
@@ -859,6 +895,7 @@ async function persistInboundDiscordMessage(
 		content: message.content,
 		metadata: {
 			username: message.author.username,
+			...metadata,
 		},
 		createdAt: message.createdAt,
 	});
@@ -868,6 +905,8 @@ async function persistInboundChatContent(
 	database: SmediaMongoDatabase,
 	message: Message,
 	content: string,
+	kind: ChatMessageKind = "chat",
+	metadata?: Record<string, unknown>,
 ): Promise<void> {
 	await appendChatMessage(database, {
 		pluginId: currentPlugin.id,
@@ -881,10 +920,11 @@ async function persistInboundChatContent(
 		userId: message.author.id,
 		discordMessageId: message.id,
 		authorRole: "user",
-		kind: "chat",
+		kind,
 		content,
 		metadata: {
 			username: message.author.username,
+			...metadata,
 		},
 		createdAt: message.createdAt,
 	});
@@ -895,6 +935,7 @@ async function persistOutboundDiscordMessage(
 	sourceMessage: Message,
 	sentMessage: Message,
 	kind: ChatMessageKind,
+	metadata?: Record<string, unknown>,
 ): Promise<void> {
 	await appendChatMessage(database, {
 		pluginId: currentPlugin.id,
@@ -912,6 +953,7 @@ async function persistOutboundDiscordMessage(
 		content: sentMessage.content,
 		metadata: {
 			relatedUserId: sourceMessage.author.id,
+			...metadata,
 		},
 		createdAt: sentMessage.createdAt,
 	});

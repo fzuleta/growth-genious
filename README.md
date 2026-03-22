@@ -23,14 +23,56 @@ Legacy social-media generation code has been removed from the active runtime sur
 
 ```bash
 npm install
-npm start
+npm run watch
 ```
 
 Local watch mode:
 
 ```bash
-npm run dev
+npm run watch
 ```
+
+Build the project:
+
+```bash
+npm run build
+```
+
+Run the typecheck test command:
+
+```bash
+npm test
+```
+
+Use the service wrapper CLI:
+
+```bash
+npm run growth -- status
+```
+
+## Enable An App
+
+This runtime supports exactly one active app/plugin at a time.
+
+Set the active app in `.env`:
+
+```bash
+PLUGIN_ID=growth-genius
+```
+
+Then make sure the matching app env file exists:
+
+```bash
+apps/growth-genius/growth-genius.env
+```
+
+Notes:
+
+- `PLUGIN_ID` is the supported setting.
+- `APP_ID` still works as a legacy alias.
+- `ENABLED_PLUGINS` is no longer supported.
+- If `PLUGIN_ID` is unset, the runtime defaults to `growth-genius`.
+- Plugin env values override `.env` values for the active app.
 
 ## Discord bot behavior
 
@@ -110,6 +152,17 @@ Accepted forms:
 - `/analytics`
 - `/analytics 30d`
 - `/analytics 2026-03-01 2026-03-21`
+- `/analytics metadata [search]`
+- `/analytics admin <resource>` where `<resource>` is one of `custom-dimensions`, `custom-metrics`, `key-events`, `data-streams`, `google-ads-links`, `firebase-links`, `audiences`, `expanded-data-sets`, `search-ads-360-links`, `dv360-links`
+- `/analytics report {json}`
+- `/analytics pivot {json}`
+- `/analytics funnel {json}`
+- `/analytics realtime {json}`
+- `/analytics help`
+
+The expanded command surface is intended to unlock property-wide analytics access instead of a single hardcoded summary. `metadata` exposes the available metrics and dimensions for the property, including custom definitions and key-event-derived metrics. Admin list endpoints expose supporting configuration like custom dimensions, custom metrics, key events, streams, and selected linked resources.
+
+Important limitation: GA4 supports funnel and pivot style exploration queries through public APIs, but Google does not expose saved Explore boards or saved explorations as listable/readable API resources.
 
 ## Plugin Env Files
 
@@ -210,4 +263,4 @@ veil uninstall
 
 - Enable the Message Content intent for the Discord bot in the developer portal.
 - The MongoDB schema still retains historical job-related collections for compatibility with existing stored data.
-- If you are upgrading from pre-plugin namespacing data, run the migration in dry-run mode first: `npm run migrate:plugin-namespace -- --plugin growth-genius`, then execute it with `--apply` once the counts look correct.
+- If you are upgrading from pre-plugin namespacing data, run the migration in dry-run mode first: `npm run migrate -- --plugin growth-genius`, then execute it with `--apply` once the counts look correct.

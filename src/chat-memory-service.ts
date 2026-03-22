@@ -209,14 +209,16 @@ async function consolidateSessionMemory(input: {
 	const sourceWindow = await listChatMessagesForMemoryWindow(input.database, {
 		pluginId: input.pluginId,
 		sessionKey: input.sessionKey,
-		kinds: ["chat"],
+		kinds: ["chat", "command", "job-update"],
 		afterCreatedAt: checkpoint?.lastParsedMessageAt ?? undefined,
 		limit: SHORT_TERM_SOURCE_LIMIT + 1,
 	});
-	const hasMoreSourceMessages = sourceWindow.length > SHORT_TERM_SOURCE_LIMIT;
+	const eligibleSourceWindow = sourceWindow.filter(isMemoryEligibleMessage);
+	const hasMoreSourceMessages = eligibleSourceWindow.length > SHORT_TERM_SOURCE_LIMIT;
 	const sourceMessages = hasMoreSourceMessages
-		? sourceWindow.slice(0, SHORT_TERM_SOURCE_LIMIT)
-		: sourceWindow;
+		? eligibleSourceWindow.slice(0, SHORT_TERM_SOURCE_LIMIT)
+		: eligibleSourceWindow;
+	const latestSeenMessageAt = sourceWindow[sourceWindow.length - 1]?.createdAt ?? null;
 
 	if (sourceMessages.length === 0) {
 		await upsertMemoryCheckpoint(input.database, {
@@ -225,13 +227,14 @@ async function consolidateSessionMemory(input: {
 			sessionKey: input.sessionKey,
 			guildId: input.guildId,
 			channelId: input.channelId,
-			lastParsedMessageAt: checkpoint?.lastParsedMessageAt ?? null,
+			lastParsedMessageAt: latestSeenMessageAt ?? checkpoint?.lastParsedMessageAt ?? null,
 			lastSourceUpdatedAt: input.sessionLastMessageAt,
 			metadata: {
-				messageCount: 0,
+				messageCount: sourceWindow.length,
+				memoryEligibleMessageCount: 0,
 				hasMoreSourceMessages: false,
 			},
-			updatedAt: input.sessionLastMessageAt,
+			updatedAt: latestSeenMessageAt ?? input.sessionLastMessageAt,
 		});
 
 		return {
@@ -343,7 +346,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	const sourceMessages = await input.database.collections.chatMessages
 		.find({
 			pluginId: input.pluginId,
-			kind: "chat",
+			kind: { $in: ["chat", "command"] },
 			$or: [
 				{ authorRole: "user", userId: input.userId },
 				{ authorRole: "assistant" },
@@ -357,8 +360,24 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		.sort({ createdAt: 1 })
 		.limit(LONG_TERM_SOURCE_LIMIT)
 		.toArray();
+	const eligibleSourceMessages = sourceMessages.filter(isMemoryEligibleMessage);
 
-	if (sourceMessages.length === 0) {
+	if (eligibleSourceMessages.length === 0) {
+		const latestSeenMessageAt = sourceMessages[sourceMessages.length - 1]?.createdAt ?? checkpoint?.lastParsedMessageAt ?? new Date();
+		await upsertMemoryCheckpoint(input.database, {
+			pluginId: input.pluginId,
+			kind: "user-long-term",
+			guildId: input.guildId,
+			channelId: input.channelId,
+			userId: input.userId,
+			lastParsedMessageAt: latestSeenMessageAt,
+			metadata: {
+				username: input.username,
+				sourceMessageCount: sourceMessages.length,
+				memoryEligibleMessageCount: 0,
+			},
+			updatedAt: latestSeenMessageAt,
+		});
 		return false;
 	}
 
@@ -371,7 +390,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 	const profileContent = await summarizeLongTermProfile({
 		contextMarkdown: input.contextMarkdown,
 		existingProfile: latestProfile?.content ?? null,
-		messages: sourceMessages,
+		messages: eligibleSourceMessages,
 		username: input.username,
 		supportingShortTermSummary: input.supportingShortTermSummary,
 	});
@@ -385,7 +404,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		sourceMessageCount: sourceMessages.length,
 		wordLimit: LONG_TERM_WORD_LIMIT,
 	});
-	const createdAt = sourceMessages[sourceMessages.length - 1]?.createdAt ?? new Date();
+	const createdAt = eligibleSourceMessages[eligibleSourceMessages.length - 1]?.createdAt ?? new Date();
 
 	await upsertMemoryEntry(input.database, {
 		pluginId: input.pluginId,
@@ -398,9 +417,9 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		content: profileContent,
 		tags: ["long-term", "profile"],
 		metadata: {
-			windowStartedAt: sourceMessages[0]?.createdAt.toISOString() ?? null,
+			windowStartedAt: eligibleSourceMessages[0]?.createdAt.toISOString() ?? null,
 			windowEndedAt: createdAt.toISOString(),
-			sourceMessageCount: sourceMessages.length,
+			sourceMessageCount: eligibleSourceMessages.length,
 		},
 		updatedAt: createdAt,
 	});
@@ -414,7 +433,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		lastParsedMessageAt: createdAt,
 		metadata: {
 			username: input.username,
-			sourceMessageCount: sourceMessages.length,
+			sourceMessageCount: eligibleSourceMessages.length,
 		},
 		updatedAt: createdAt,
 	});
@@ -458,9 +477,12 @@ async function summarizeShortTermMemory(input: {
 		"Rules:",
 		"- Stay concise and factual.",
 		"- Preserve the assistant role and priorities implied by the context.",
-		"- Include decisions, constraints, current asks, and active job context when relevant.",
+		"- Include decisions, constraints, current asks, active job context, command outcomes, and analytics findings when relevant.",
 		"- In Preferences And Opinions, only include durable preferences or explicit opinions about the user, the job, the work, quality bar, priorities, or process.",
 		"- Ignore trivial banter.",
+		"- Treat command interactions as high-signal only when they reveal intent, decisions, requested outputs, reporting needs, findings, or execution state.",
+		"- Do not waste space on raw command syntax, boilerplate status output, file path lists, or large numeric tables unless they matter to the next turn.",
+		"- Compress analytics interactions into what was asked, what was learned, and what remains open.",
 		"- Prefer compressed phrases over full sentences when meaning stays clear.",
 		"- Drop low-value detail, repetition, examples, and narrative glue.",
 		"- Keep only information worth paying tokens for in future chats.",
@@ -494,6 +516,8 @@ async function summarizeLongTermProfile(input: {
 		"Rules:",
 		"- Keep only durable, repeated, or high-signal facts.",
 		"- Explicitly allow personal opinions when the user states opinions about themselves, the job, the work, the team, priorities, or standards.",
+		"- Command and analytics interactions matter only if they reveal stable preferences: reporting habits, favored metrics, preferred outputs, workflow expectations, quality bar, or repeated goals.",
+		"- Exclude one-off commands, transient report results, and routine operational chatter unless they imply an enduring priority or preference.",
 		"- Do not invent facts.",
 		"- Merge with the existing profile and remove stale or weak points when unsupported.",
 		"- Prefer compressed phrases over full sentences when meaning stays clear.",
@@ -550,15 +574,32 @@ function formatMessagesForPrompt(messages: ChatMessageDocument[]): string {
 				typeof message.metadata?.username === "string" && message.metadata.username.trim()
 					? message.metadata.username.trim()
 					: null;
+			const commandName =
+				typeof message.metadata?.commandName === "string" && message.metadata.commandName.trim()
+					? message.metadata.commandName.trim()
+					: null;
 			const label =
 				message.authorRole === "assistant"
 					? "assistant"
 					: username
 						? `user:${username}`
 						: "user";
-			return `[${message.createdAt.toISOString()}] ${label}: ${message.content}`;
+			const kindLabel = message.kind === "chat" ? null : `kind=${message.kind}`;
+			const commandLabel = commandName ? `command=${commandName}` : null;
+			return [
+				`[${message.createdAt.toISOString()}] ${label}`,
+				kindLabel,
+				commandLabel,
+				`: ${message.content}`,
+			]
+				.filter((value): value is string => value !== null)
+				.join(" ");
 		})
 		.join("\n");
+}
+
+function isMemoryEligibleMessage(message: ChatMessageDocument): boolean {
+	return message.metadata?.memoryEligible !== false;
 }
 
 function trimToWordLimit(text: string, limit: number): string {

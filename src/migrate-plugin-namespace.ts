@@ -123,7 +123,7 @@ function parseOptions(argv: string[]): MigrationOptions {
 }
 
 function printHelp(): void {
-	console.log(`Usage: npm run migrate:plugin-namespace -- [--plugin <plugin-id>] [--apply]
+	console.log(`Usage: npm run migrate -- [--plugin <plugin-id>] [--apply]
 
 Options:
   --plugin <plugin-id>  Override the plugin id to backfill. Defaults to PLUGIN_ID.

@@ -11,9 +11,22 @@ const ANALYTICS_REQUIRED_ENV = [
 
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
-const GOOGLE_ANALYTICS_API_BASE = "https://analyticsdata.googleapis.com/v1beta";
+const GOOGLE_ANALYTICS_DATA_API_BETA_BASE = "https://analyticsdata.googleapis.com/v1beta";
+const GOOGLE_ANALYTICS_DATA_API_ALPHA_BASE = "https://analyticsdata.googleapis.com/v1alpha";
+const GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE = "https://analyticsadmin.googleapis.com/v1beta";
+const GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE = "https://analyticsadmin.googleapis.com/v1alpha";
 const DEFAULT_LOOKBACK_DAYS = 7;
 const MAX_LOOKBACK_DAYS = 90;
+const MAX_METADATA_PREVIEW_ITEMS = 25;
+const MAX_ADMIN_PREVIEW_ITEMS = 20;
+
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+
+interface JsonObject {
+	[key: string]: JsonValue;
+}
+
+type AnalyticsOperationKind = "help" | "legacy-report" | "metadata" | "admin" | "report" | "pivot" | "funnel" | "realtime";
 
 interface AnalyticsDateRange {
 	label: string;
@@ -52,11 +65,124 @@ interface GoogleAnalyticsReportResponse {
 	totals?: GoogleAnalyticsRow[];
 	rowCount?: number;
 	metadata?: Record<string, unknown>;
+	[property: string]: unknown;
 }
+
+interface GoogleAnalyticsMetadataItem {
+	apiName?: string;
+	uiName?: string;
+	description?: string;
+	customDefinition?: boolean;
+	deprecatedApiNames?: string[];
+	type?: string;
+	expression?: string;
+	category?: string;
+	blockedReasons?: string[];
+	[property: string]: unknown;
+}
+
+interface GoogleAnalyticsMetadataResponse {
+	dimensions?: GoogleAnalyticsMetadataItem[];
+	metrics?: GoogleAnalyticsMetadataItem[];
+	[property: string]: unknown;
+}
+
+interface GoogleAnalyticsFunnelResponse {
+	funnelTable?: GoogleAnalyticsReportResponse;
+	funnelVisualization?: GoogleAnalyticsReportResponse;
+	propertyQuota?: Record<string, unknown>;
+	[property: string]: unknown;
+}
+
+interface AnalyticsOperationRequest {
+	kind: AnalyticsOperationKind;
+	dateRange?: AnalyticsDateRange;
+	searchQuery?: string;
+	adminResource?: string;
+	payload?: JsonObject;
+}
+
+interface AnalyticsExecutionResult {
+	reply: string;
+	requestPayload: JsonObject;
+	responsePayload: JsonObject;
+	summaryMarkdown: string;
+	legacyReportArtifact?: JsonObject;
+}
+
+interface AdminResourceConfig {
+	apiBase: string;
+	path: (propertyId: string) => string;
+	responseKey: string;
+	description: string;
+}
+
+const ADMIN_RESOURCE_CONFIG: Record<string, AdminResourceConfig> = {
+	"custom-dimensions": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/customDimensions`,
+		responseKey: "customDimensions",
+		description: "Registered event, user, and item scoped custom dimensions.",
+	},
+	"custom-metrics": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/customMetrics`,
+		responseKey: "customMetrics",
+		description: "Registered custom metrics.",
+	},
+	"key-events": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/keyEvents`,
+		responseKey: "keyEvents",
+		description: "Configured key events for the property.",
+	},
+	"data-streams": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/dataStreams`,
+		responseKey: "dataStreams",
+		description: "Web, iOS, and Android data streams.",
+	},
+	"google-ads-links": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/googleAdsLinks`,
+		responseKey: "googleAdsLinks",
+		description: "Linked Google Ads accounts.",
+	},
+	"firebase-links": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/firebaseLinks`,
+		responseKey: "firebaseLinks",
+		description: "Linked Firebase projects.",
+	},
+	"audiences": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/audiences`,
+		responseKey: "audiences",
+		description: "Audience definitions available through the Admin API alpha surface.",
+	},
+	"expanded-data-sets": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/expandedDataSets`,
+		responseKey: "expandedDataSets",
+		description: "Expanded data set definitions available for eligible properties.",
+	},
+	"search-ads-360-links": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/searchAds360Links`,
+		responseKey: "searchAds360Links",
+		description: "Linked Search Ads 360 accounts.",
+	},
+	"dv360-links": {
+		apiBase: GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE,
+		path: (propertyId) => `/properties/${propertyId}/displayVideo360AdvertiserLinks`,
+		responseKey: "displayVideo360AdvertiserLinks",
+		description: "Linked Display & Video 360 advertisers.",
+	},
+};
 
 export const analyticsCommand: PluginCommand = {
 	name: "analytics",
-	description: "Fetch workspace analytics data for the growth-genius plugin.",
+	description: "Fetch GA4 metadata, reports, pivots, funnels, realtime data, and admin resources for the growth-genius plugin.",
 	requiredEnv: ANALYTICS_REQUIRED_ENV,
 	handle: async (input) => {
 		const analyticsOutputDir = path.join(input.outputDir, "analytics");
@@ -65,23 +191,24 @@ export const analyticsCommand: PluginCommand = {
 		const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
 		const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
 		const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
-		const dateRange = parseAnalyticsDateRange(input.args);
+		const operation = parseAnalyticsOperation(input.args);
 
 		const accessToken = await getGoogleAccessToken({
 			serviceAccountEmail,
 			serviceAccountPrivateKey,
 		});
-		const report = await runAnalyticsReport({
+
+		const execution = await executeAnalyticsOperation({
 			propertyId,
 			accessToken,
-			dateRange,
+			operation,
 		});
 
-		const summary = buildReportSummary(report, dateRange, propertyId);
 		const requestedAt = new Date().toISOString();
 		const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
-		const reportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
+		const responseArtifactPath = path.join(analyticsOutputDir, "latest-response.json");
 		const summaryArtifactPath = path.join(analyticsOutputDir, "latest-summary.md");
+		const legacyReportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
 
 		await writeFile(
 			requestArtifactPath,
@@ -98,36 +225,468 @@ export const analyticsCommand: PluginCommand = {
 					pluginRootDir: input.plugin.rootDir,
 					outputDir: input.plugin.outputDir,
 					propertyId,
-					dateRange,
+					operation: execution.requestPayload,
 				},
 				null,
 				2,
 			),
 			"utf8",
 		);
-		await writeFile(reportArtifactPath, JSON.stringify(report, null, 2), "utf8");
-		await writeFile(summaryArtifactPath, summary.markdown, "utf8");
+		await writeFile(responseArtifactPath, JSON.stringify(execution.responsePayload, null, 2), "utf8");
+		await writeFile(summaryArtifactPath, execution.summaryMarkdown, "utf8");
+
+		const outputFiles = [
+			path.relative(process.cwd(), requestArtifactPath),
+			path.relative(process.cwd(), responseArtifactPath),
+			path.relative(process.cwd(), summaryArtifactPath),
+		];
+
+		if (execution.legacyReportArtifact) {
+			await writeFile(legacyReportArtifactPath, JSON.stringify(execution.legacyReportArtifact, null, 2), "utf8");
+			outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
+		}
 
 		return {
-			reply: [
-				`/analytics routed to ${input.plugin.id}.`,
-				`property=${propertyId}`,
-				`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
-				`activeUsers=${summary.totals.activeUsers}`,
-				`newUsers=${summary.totals.newUsers}`,
-				`sessions=${summary.totals.sessions}`,
-				`screenPageViews=${summary.totals.screenPageViews}`,
-				`engagementRate=${summary.totals.engagementRate}`,
-				`rows=${summary.rowCount}`,
-			].join("\n"),
-			outputFiles: [
-				path.relative(process.cwd(), requestArtifactPath),
-				path.relative(process.cwd(), reportArtifactPath),
-				path.relative(process.cwd(), summaryArtifactPath),
-			],
+			reply: execution.reply,
+			outputFiles,
 		};
 	},
 };
+
+function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
+	const trimmed = args.trim();
+	if (!trimmed) {
+		return {
+			kind: "legacy-report",
+			dateRange: buildTrailingDayRange(DEFAULT_LOOKBACK_DAYS),
+		};
+	}
+
+	if (looksLikeLegacyDateRange(trimmed)) {
+		return {
+			kind: "legacy-report",
+			dateRange: parseAnalyticsDateRange(trimmed),
+		};
+	}
+
+	const [operationToken, ...restTokens] = trimmed.split(/\s+/);
+	const operationName = operationToken.toLowerCase();
+	const remainder = trimmed.slice(operationToken.length).trim();
+
+	switch (operationName) {
+		case "help":
+			return { kind: "help" };
+		case "metadata":
+			return {
+				kind: "metadata",
+				searchQuery: remainder || undefined,
+			};
+		case "admin": {
+			const adminResource = restTokens[0]?.toLowerCase();
+			if (!adminResource) {
+				throw new Error(`Missing admin resource. Supported resources: ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}.`);
+			}
+
+			if (!(adminResource in ADMIN_RESOURCE_CONFIG)) {
+				throw new Error(`Unsupported admin resource '${adminResource}'. Supported resources: ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}.`);
+			}
+
+			return {
+				kind: "admin",
+				adminResource,
+				searchQuery: restTokens.slice(1).join(" ").trim() || undefined,
+			};
+		}
+		case "report":
+		case "pivot":
+		case "funnel":
+		case "realtime":
+			return {
+				kind: operationName,
+				payload: parseJsonPayload(operationName, remainder),
+			};
+		default:
+			throw new Error(buildHelpText());
+	}
+}
+
+function looksLikeLegacyDateRange(value: string): boolean {
+	return /^(?:last:?)?\d{1,3}d(?:ays)?$/i.test(value) || /^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function parseJsonPayload(kind: string, raw: string): JsonObject {
+	if (!raw) {
+		throw new Error(`Missing JSON payload for /analytics ${kind}. ${buildHelpText()}`);
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(`Invalid JSON payload for /analytics ${kind}: ${formatErrorMessage(error)}`);
+	}
+
+	if (!isJsonObject(parsed)) {
+		throw new Error(`Expected a JSON object for /analytics ${kind}.`);
+	}
+
+	return parsed;
+}
+
+async function executeAnalyticsOperation(input: {
+	propertyId: string;
+	accessToken: string;
+	operation: AnalyticsOperationRequest;
+}): Promise<AnalyticsExecutionResult> {
+	switch (input.operation.kind) {
+		case "help":
+			return buildHelpExecutionResult();
+		case "legacy-report":
+			return await executeLegacyReport(input.propertyId, input.accessToken, input.operation.dateRange!);
+		case "metadata":
+			return await executeMetadataRequest(input.propertyId, input.accessToken, input.operation.searchQuery);
+		case "admin":
+			return await executeAdminRequest(input.propertyId, input.accessToken, input.operation.adminResource!, input.operation.searchQuery);
+		case "report":
+			return await executeReportRequest(input.propertyId, input.accessToken, input.operation.payload!);
+		case "pivot":
+			return await executePivotRequest(input.propertyId, input.accessToken, input.operation.payload!);
+		case "funnel":
+			return await executeFunnelRequest(input.propertyId, input.accessToken, input.operation.payload!);
+		case "realtime":
+			return await executeRealtimeRequest(input.propertyId, input.accessToken, input.operation.payload!);
+	}
+}
+
+function buildHelpExecutionResult(): AnalyticsExecutionResult {
+	const summaryMarkdown = [
+		"# Analytics Command Help",
+		"",
+		"## Preserved default report",
+		"",
+		"- `/analytics`",
+		"- `/analytics 30d`",
+		"- `/analytics 2026-03-01 2026-03-21`",
+		"",
+		"## Discovery",
+		"",
+		"- `/analytics metadata`",
+		"- `/analytics metadata event`",
+		`- "/analytics admin <resource>" where <resource> is one of: ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}`,
+		"",
+		"## Flexible GA4 queries",
+		"",
+		"- `/analytics report {\"days\":30,\"dimensions\":[\"eventName\"],\"metrics\":[\"eventCount\"],\"limit\":25}`",
+		"- `/analytics pivot {\"days\":30,\"dimensions\":[\"deviceCategory\",\"eventName\"],\"metrics\":[\"eventCount\"],\"pivots\":[{\"fieldNames\":[\"deviceCategory\"],\"limit\":5},{\"fieldNames\":[\"eventName\"],\"limit\":10}]}`",
+		"- `/analytics funnel {\"days\":30,\"funnel\":{\"steps\":[{\"name\":\"Landing\",\"filterExpression\":{\"funnelEventFilter\":{\"eventName\":\"page_view\"}}},{\"name\":\"Purchase\",\"filterExpression\":{\"funnelEventFilter\":{\"eventName\":\"purchase\"}}}]}}`",
+		"- `/analytics realtime {\"dimensions\":[\"eventName\"],\"metrics\":[\"eventCount\"],\"limit\":10}`",
+		"",
+		"## Notes",
+		"",
+		"- `metadata` is the way to discover property-specific metrics, dimensions, custom definitions, and key-event-derived metrics.",
+		"- `report`, `pivot`, `funnel`, and `realtime` accept native GA4 API request bodies with a few conveniences: `days`, `startDate`, and `endDate`.",
+		"- GA4 exposes funnel/pivot style exploration queries, but it does not expose saved Explore boards or explorations as listable API resources.",
+	].join("\n");
+
+	return {
+		reply: [
+			"/analytics help",
+			"legacyReport=true",
+			"metadata=true",
+			`adminResources=${Object.keys(ADMIN_RESOURCE_CONFIG).join(",")}`,
+			"customReports=true",
+			"savedExploreBoardsApi=false",
+		].join("\n"),
+		requestPayload: { kind: "help" },
+		responsePayload: { help: summaryMarkdown },
+		summaryMarkdown,
+	};
+}
+
+async function executeLegacyReport(propertyId: string, accessToken: string, dateRange: AnalyticsDateRange): Promise<AnalyticsExecutionResult> {
+	const requestPayload = {
+		kind: "legacy-report",
+		dateRange: serializeDateRange(dateRange),
+		request: {
+			dateRanges: [
+				{
+					startDate: dateRange.startDate,
+					endDate: dateRange.endDate,
+				},
+			],
+			dimensions: [{ name: "date" }],
+			metrics: [
+				{ name: "activeUsers" },
+				{ name: "newUsers" },
+				{ name: "sessions" },
+				{ name: "screenPageViews" },
+				{ name: "engagementRate" },
+			],
+			orderBys: [
+				{
+					dimension: { dimensionName: "date", orderType: "ALPHANUMERIC" },
+				},
+			],
+			metricAggregations: ["TOTAL"],
+			limit: String(MAX_LOOKBACK_DAYS),
+		},
+	} satisfies JsonObject;
+
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runReport`,
+		accessToken,
+		body: requestPayload.request as JsonObject,
+	});
+
+	const summary = buildReportSummary(report, dateRange, propertyId, "Analytics Summary");
+	return {
+		reply: [
+			`/analytics routed to legacy report for property ${propertyId}.`,
+			`range=${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+			`activeUsers=${summary.totals.activeUsers ?? "0"}`,
+			`newUsers=${summary.totals.newUsers ?? "0"}`,
+			`sessions=${summary.totals.sessions ?? "0"}`,
+			`screenPageViews=${summary.totals.screenPageViews ?? "0"}`,
+			`engagementRate=${summary.totals.engagementRate ?? "0"}`,
+			`rows=${summary.rowCount}`,
+		].join("\n"),
+		requestPayload,
+		responsePayload: report as JsonObject,
+		summaryMarkdown: summary.markdown,
+		legacyReportArtifact: report as JsonObject,
+	};
+}
+
+async function executeMetadataRequest(propertyId: string, accessToken: string, searchQuery?: string): Promise<AnalyticsExecutionResult> {
+	const metadata = await runAnalyticsRequest<GoogleAnalyticsMetadataResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}/metadata`,
+		accessToken,
+		method: "GET",
+	});
+
+	const filteredMetadata = filterMetadata(metadata, searchQuery);
+	const dimensions = filteredMetadata.dimensions ?? [];
+	const metrics = filteredMetadata.metrics ?? [];
+	const customDimensions = dimensions.filter((item) => item.customDefinition || item.apiName?.startsWith("custom")).length;
+	const customMetrics = metrics.filter((item) => item.customDefinition || item.apiName?.startsWith("custom") || item.apiName?.startsWith("averageCustom") || item.apiName?.startsWith("countCustom")).length;
+	const summaryMarkdown = [
+		"# Analytics Metadata",
+		"",
+		`- property: ${propertyId}`,
+		`- filter: ${searchQuery || "none"}`,
+		`- dimensions: ${dimensions.length}`,
+		`- metrics: ${metrics.length}`,
+		`- customDimensions: ${customDimensions}`,
+		`- customMetrics: ${customMetrics}`,
+		"",
+		"## Dimension Preview",
+		"",
+		...buildMetadataPreview(dimensions),
+		"",
+		"## Metric Preview",
+		"",
+		...buildMetadataPreview(metrics),
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics metadata for property ${propertyId}.`,
+			`filter=${searchQuery || "none"}`,
+			`dimensions=${dimensions.length}`,
+			`metrics=${metrics.length}`,
+			`customDimensions=${customDimensions}`,
+			`customMetrics=${customMetrics}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "metadata",
+			filter: searchQuery ?? null,
+		},
+		responsePayload: filteredMetadata as JsonObject,
+		summaryMarkdown,
+	};
+}
+
+async function executeAdminRequest(propertyId: string, accessToken: string, resource: string, searchQuery?: string): Promise<AnalyticsExecutionResult> {
+	const resourceConfig = ADMIN_RESOURCE_CONFIG[resource];
+	const response = await listAdminResources({
+		propertyId,
+		accessToken,
+		resource,
+		config: resourceConfig,
+	});
+	const filteredItems = filterAdminItems(response.items, searchQuery);
+	const summaryMarkdown = [
+		`# Analytics Admin: ${resource}`,
+		"",
+		`- property: ${propertyId}`,
+		`- description: ${resourceConfig.description}`,
+		`- filter: ${searchQuery || "none"}`,
+		`- items: ${filteredItems.length}`,
+		"",
+		"## Preview",
+		"",
+		...buildAdminPreview(filteredItems),
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics admin ${resource} for property ${propertyId}.`,
+			`filter=${searchQuery || "none"}`,
+			`items=${filteredItems.length}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "admin",
+			resource,
+			filter: searchQuery ?? null,
+		},
+		responsePayload: {
+			resource,
+			description: resourceConfig.description,
+			[resourceConfig.responseKey]: filteredItems,
+		} as JsonObject,
+		summaryMarkdown,
+	};
+}
+
+async function executeReportRequest(propertyId: string, accessToken: string, payload: JsonObject): Promise<AnalyticsExecutionResult> {
+	const normalizedRequest = normalizeReportRequest(payload);
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runReport`,
+		accessToken,
+		body: normalizedRequest,
+	});
+
+	const dateRangeLabel = describeRequestDateRanges(normalizedRequest.dateRanges);
+	const summary = buildReportSummary(report, dateRangeLabel, propertyId, "Analytics Report");
+	return {
+		reply: [
+			`/analytics report for property ${propertyId}.`,
+			`range=${dateRangeLabel}`,
+			`dimensions=${(report.dimensionHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`metrics=${(report.metricHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`rows=${summary.rowCount}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "report",
+			request: normalizedRequest,
+		},
+		responsePayload: report as JsonObject,
+		summaryMarkdown: summary.markdown,
+		legacyReportArtifact: report as JsonObject,
+	};
+}
+
+async function executePivotRequest(propertyId: string, accessToken: string, payload: JsonObject): Promise<AnalyticsExecutionResult> {
+	const normalizedRequest = normalizePivotRequest(payload);
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runPivotReport`,
+		accessToken,
+		body: normalizedRequest,
+	});
+
+	const summaryMarkdown = buildGenericTabularSummary({
+		title: "Analytics Pivot Report",
+		propertyId,
+		dateRangeLabel: describeRequestDateRanges(normalizedRequest.dateRanges),
+		report,
+	});
+
+	return {
+		reply: [
+			`/analytics pivot for property ${propertyId}.`,
+			`range=${describeRequestDateRanges(normalizedRequest.dateRanges)}`,
+			`dimensions=${(report.dimensionHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`metrics=${(report.metricHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`rows=${report.rowCount ?? report.rows?.length ?? 0}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "pivot",
+			request: normalizedRequest,
+		},
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+	};
+}
+
+async function executeRealtimeRequest(propertyId: string, accessToken: string, payload: JsonObject): Promise<AnalyticsExecutionResult> {
+	const normalizedRequest = normalizeRealtimeRequest(payload);
+	const report = await runAnalyticsRequest<GoogleAnalyticsReportResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_BETA_BASE,
+		path: `/properties/${propertyId}:runRealtimeReport`,
+		accessToken,
+		body: normalizedRequest,
+	});
+
+	const summaryMarkdown = buildGenericTabularSummary({
+		title: "Analytics Realtime Report",
+		propertyId,
+		dateRangeLabel: "realtime",
+		report,
+	});
+
+	return {
+		reply: [
+			`/analytics realtime for property ${propertyId}.`,
+			`dimensions=${(report.dimensionHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`metrics=${(report.metricHeaders ?? []).map((item) => item.name).join(",") || "none"}`,
+			`rows=${report.rowCount ?? report.rows?.length ?? 0}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "realtime",
+			request: normalizedRequest,
+		},
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+	};
+}
+
+async function executeFunnelRequest(propertyId: string, accessToken: string, payload: JsonObject): Promise<AnalyticsExecutionResult> {
+	const normalizedRequest = normalizeFunnelRequest(payload);
+	const report = await runAnalyticsRequest<GoogleAnalyticsFunnelResponse>({
+		apiBase: GOOGLE_ANALYTICS_DATA_API_ALPHA_BASE,
+		path: `/properties/${propertyId}:runFunnelReport`,
+		accessToken,
+		body: normalizedRequest,
+	});
+
+	const funnelTableRows = report.funnelTable?.rows?.length ?? 0;
+	const funnelVisualizationRows = report.funnelVisualization?.rows?.length ?? 0;
+	const summaryMarkdown = [
+		"# Analytics Funnel Report",
+		"",
+		`- property: ${propertyId}`,
+		`- range: ${describeRequestDateRanges(normalizedRequest.dateRanges)}`,
+		`- funnelTableRows: ${funnelTableRows}`,
+		`- funnelVisualizationRows: ${funnelVisualizationRows}`,
+		"",
+		"## Funnel Table Headers",
+		"",
+		...buildHeaderPreview(report.funnelTable),
+		"",
+		"## Funnel Visualization Headers",
+		"",
+		...buildHeaderPreview(report.funnelVisualization),
+	].join("\n");
+
+	return {
+		reply: [
+			`/analytics funnel for property ${propertyId}.`,
+			`range=${describeRequestDateRanges(normalizedRequest.dateRanges)}`,
+			`funnelTableRows=${funnelTableRows}`,
+			`funnelVisualizationRows=${funnelVisualizationRows}`,
+		].join("\n"),
+		requestPayload: {
+			kind: "funnel",
+			request: normalizedRequest,
+		},
+		responsePayload: report as JsonObject,
+		summaryMarkdown,
+	};
+}
 
 function parseAnalyticsDateRange(args: string): AnalyticsDateRange {
 	const trimmed = args.trim();
@@ -150,7 +709,7 @@ function parseAnalyticsDateRange(args: string): AnalyticsDateRange {
 		};
 	}
 
-	throw new Error("Unsupported /analytics args. Use '/analytics', '/analytics 30d', or '/analytics 2026-03-01 2026-03-21'.");
+	throw new Error(buildHelpText());
 }
 
 function buildTrailingDayRange(days: number): AnalyticsDateRange {
@@ -174,6 +733,14 @@ function clampLookback(days: number): number {
 
 function formatDate(value: Date): string {
 	return value.toISOString().slice(0, 10);
+}
+
+function serializeDateRange(dateRange: AnalyticsDateRange): JsonObject {
+	return {
+		label: dateRange.label,
+		startDate: dateRange.startDate,
+		endDate: dateRange.endDate,
+	};
 }
 
 function normalizePrivateKey(value: string): string {
@@ -233,50 +800,177 @@ function base64UrlEncodeJson(value: Record<string, unknown>): string {
 	return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
-async function runAnalyticsReport(input: {
-	propertyId: string;
+async function runAnalyticsRequest<ResponseType>(input: {
+	apiBase: string;
+	path: string;
 	accessToken: string;
-	dateRange: AnalyticsDateRange;
-}): Promise<GoogleAnalyticsReportResponse> {
-	const response = await fetch(`${GOOGLE_ANALYTICS_API_BASE}/properties/${input.propertyId}:runReport`, {
-		method: "POST",
+	method?: "GET" | "POST";
+	body?: JsonObject;
+	query?: Record<string, string>;
+}): Promise<ResponseType> {
+	const url = new URL(`${input.apiBase}${input.path}`);
+	for (const [key, value] of Object.entries(input.query ?? {})) {
+		url.searchParams.set(key, value);
+	}
+
+	const response = await fetch(url, {
+		method: input.method ?? (input.body ? "POST" : "GET"),
 		headers: {
 			authorization: `Bearer ${input.accessToken}`,
 			"content-type": "application/json",
 		},
-		body: JSON.stringify({
-			dateRanges: [
-				{
-					startDate: input.dateRange.startDate,
-					endDate: input.dateRange.endDate,
-				},
-			],
-			dimensions: [{ name: "date" }],
-			metrics: [
-				{ name: "activeUsers" },
-				{ name: "newUsers" },
-				{ name: "sessions" },
-				{ name: "screenPageViews" },
-				{ name: "engagementRate" },
-			],
-			orderBys: [
-				{
-					dimension: { dimensionName: "date", orderType: "ALPHANUMERIC" },
-				},
-			],
-			metricAggregations: ["TOTAL"],
-			limit: MAX_LOOKBACK_DAYS,
-		}),
+		body: input.body ? JSON.stringify(input.body) : undefined,
 	});
 
 	if (!response.ok) {
-		throw new Error(`Google Analytics report request failed with ${response.status}: ${await response.text()}`);
+		throw new Error(`Google Analytics API request failed with ${response.status}: ${await response.text()}`);
 	}
 
-	return await response.json() as GoogleAnalyticsReportResponse;
+	return await response.json() as ResponseType;
 }
 
-function buildReportSummary(report: GoogleAnalyticsReportResponse, dateRange: AnalyticsDateRange, propertyId: string): {
+async function listAdminResources(input: {
+	propertyId: string;
+	accessToken: string;
+	resource: string;
+	config: AdminResourceConfig;
+}): Promise<{ items: JsonObject[] }> {
+	const items: JsonObject[] = [];
+	let pageToken: string | undefined;
+
+	do {
+		const response = await runAnalyticsRequest<Record<string, unknown>>({
+			apiBase: input.config.apiBase,
+			path: input.config.path(input.propertyId),
+			accessToken: input.accessToken,
+			method: "GET",
+			query: {
+				pageSize: "200",
+				...(pageToken ? { pageToken } : {}),
+			},
+		});
+
+		const pageItems = (response[input.config.responseKey] as unknown[] | undefined) ?? [];
+		for (const item of pageItems) {
+			if (isJsonObject(item)) {
+				items.push(item);
+			}
+		}
+
+		pageToken = typeof response.nextPageToken === "string" && response.nextPageToken ? response.nextPageToken : undefined;
+	} while (pageToken);
+
+	return { items };
+}
+
+function normalizeReportRequest(payload: JsonObject): JsonObject {
+	const request = withDefaultDateRanges(payload, true);
+	return normalizeCommonDataRequest(request, ["dimensions", "metrics"]);
+}
+
+function normalizePivotRequest(payload: JsonObject): JsonObject {
+	const request = withDefaultDateRanges(payload, true);
+	const normalized = normalizeCommonDataRequest(request, ["dimensions", "metrics", "pivots"]);
+	return normalizeNumericStringFields(normalized, new Set(["limit", "offset"])) as JsonObject;
+}
+
+function normalizeRealtimeRequest(payload: JsonObject): JsonObject {
+	const normalized = cloneJsonObject(payload);
+	return normalizeCommonDataRequest(normalized, ["dimensions", "metrics"]);
+}
+
+function normalizeFunnelRequest(payload: JsonObject): JsonObject {
+	const request = withDefaultDateRanges(payload, true);
+	if (!isJsonObject(request.funnel)) {
+		throw new Error("/analytics funnel requires a JSON payload with a funnel object.");
+	}
+
+	return normalizeNumericStringFields(cloneJsonObject(request), new Set(["limit", "offset"])) as JsonObject;
+}
+
+function withDefaultDateRanges(payload: JsonObject, useDefaultLookback: boolean): JsonObject {
+	const request = cloneJsonObject(payload);
+	const daysValue = typeof request.days === "number" ? request.days : undefined;
+	const startDate = typeof request.startDate === "string" ? request.startDate : undefined;
+	const endDate = typeof request.endDate === "string" ? request.endDate : undefined;
+
+	delete request.days;
+	delete request.startDate;
+	delete request.endDate;
+
+	if (Array.isArray(request.dateRanges)) {
+		return request;
+	}
+
+	if (daysValue !== undefined) {
+		const range = buildTrailingDayRange(clampLookback(daysValue));
+		request.dateRanges = [{ startDate: range.startDate, endDate: range.endDate }];
+		return request;
+	}
+
+	if (startDate && endDate) {
+		request.dateRanges = [{ startDate, endDate }];
+		return request;
+	}
+
+	if (useDefaultLookback) {
+		const range = buildTrailingDayRange(DEFAULT_LOOKBACK_DAYS);
+		request.dateRanges = [{ startDate: range.startDate, endDate: range.endDate }];
+	}
+
+	return request;
+}
+
+function normalizeCommonDataRequest(payload: JsonObject, _keysToNormalize: string[]): JsonObject {
+	const normalized = cloneJsonObject(payload);
+	if (Array.isArray(normalized.dimensions)) {
+		normalized.dimensions = normalizeNamedArray(normalized.dimensions);
+	}
+	if (Array.isArray(normalized.metrics)) {
+		normalized.metrics = normalizeNamedArray(normalized.metrics);
+	}
+
+	return normalizeNumericStringFields(normalized, new Set(["limit", "offset"])) as JsonObject;
+}
+
+function normalizeNamedArray(values: JsonValue[]): JsonValue[] {
+	return values.map((value) => {
+		if (typeof value === "string") {
+			return { name: value };
+		}
+
+		return value;
+	});
+}
+
+function normalizeNumericStringFields(value: JsonValue, fieldNames: Set<string>): JsonValue {
+	if (Array.isArray(value)) {
+		return value.map((item) => normalizeNumericStringFields(item, fieldNames));
+	}
+
+	if (!isJsonObject(value)) {
+		return value;
+	}
+
+	const normalized: JsonObject = {};
+	for (const [key, childValue] of Object.entries(value)) {
+		if (typeof childValue === "number" && fieldNames.has(key)) {
+			normalized[key] = String(Math.trunc(childValue));
+			continue;
+		}
+
+		normalized[key] = normalizeNumericStringFields(childValue, fieldNames);
+	}
+
+	return normalized;
+}
+
+function buildReportSummary(
+	report: GoogleAnalyticsReportResponse,
+	dateRange: AnalyticsDateRange | string,
+	propertyId: string,
+	title: string,
+): {
 	rowCount: number;
 	totals: Record<string, string>;
 	markdown: string;
@@ -287,16 +981,29 @@ function buildReportSummary(report: GoogleAnalyticsReportResponse, dateRange: An
 		metricNames.map((metricName, index) => [metricName, formatMetricValue(metricName, totalValues[index]?.value ?? "0")]),
 	);
 	const rowCount = report.rowCount ?? report.rows?.length ?? 0;
+	const rangeLabel = typeof dateRange === "string"
+		? dateRange
+		: `${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`;
 	const markdown = [
-		"# Analytics Summary",
+		`# ${title}`,
 		"",
 		`- property: ${propertyId}`,
-		`- range: ${dateRange.startDate}..${dateRange.endDate} (${dateRange.label})`,
+		`- range: ${rangeLabel}`,
 		`- rows: ${rowCount}`,
+		"",
+		"## Dimensions",
+		"",
+		...((report.dimensionHeaders ?? []).map((dimension) => `- ${dimension.name}`)),
+		"",
+		"## Metrics",
+		"",
+		...(metricNames.length > 0 ? metricNames.map((metricName) => `- ${metricName}`) : ["- none"]),
 		"",
 		"## Totals",
 		"",
-		...metricNames.map((metricName) => `- ${metricName}: ${totals[metricName] ?? "0"}`),
+		...(metricNames.length > 0
+			? metricNames.map((metricName) => `- ${metricName}: ${totals[metricName] ?? "0"}`)
+			: ["- none"]),
 	].join("\n");
 
 	return {
@@ -304,6 +1011,49 @@ function buildReportSummary(report: GoogleAnalyticsReportResponse, dateRange: An
 		totals,
 		markdown,
 	};
+}
+
+function buildGenericTabularSummary(input: {
+	title: string;
+	propertyId: string;
+	dateRangeLabel: string;
+	report: GoogleAnalyticsReportResponse;
+}): string {
+	return [
+		`# ${input.title}`,
+		"",
+		`- property: ${input.propertyId}`,
+		`- range: ${input.dateRangeLabel}`,
+		`- rows: ${input.report.rowCount ?? input.report.rows?.length ?? 0}`,
+		"",
+		"## Dimensions",
+		"",
+		...buildHeaderList(input.report.dimensionHeaders),
+		"",
+		"## Metrics",
+		"",
+		...buildHeaderList(input.report.metricHeaders),
+	].join("\n");
+}
+
+function buildHeaderList(headers: Array<{ name: string }> | undefined): string[] {
+	if (!headers || headers.length === 0) {
+		return ["- none"];
+	}
+
+	return headers.map((header) => `- ${header.name}`);
+}
+
+function buildHeaderPreview(report: GoogleAnalyticsReportResponse | undefined): string[] {
+	if (!report) {
+		return ["- none"];
+	}
+
+	return [
+		...buildHeaderList(report.dimensionHeaders),
+		"",
+		...buildHeaderList(report.metricHeaders),
+	];
 }
 
 function formatMetricValue(metricName: string, value: string): string {
@@ -321,4 +1071,124 @@ function formatMetricValue(metricName: string, value: string): string {
 	}
 
 	return numericValue.toFixed(2);
+}
+
+function filterMetadata(metadata: GoogleAnalyticsMetadataResponse, searchQuery?: string): GoogleAnalyticsMetadataResponse {
+	if (!searchQuery) {
+		return metadata;
+	}
+
+	const query = searchQuery.trim().toLowerCase();
+	const matches = (item: GoogleAnalyticsMetadataItem): boolean => {
+		return [item.apiName, item.uiName, item.description, item.category]
+			.filter((value): value is string => typeof value === "string")
+			.some((value) => value.toLowerCase().includes(query));
+	};
+
+	return {
+		...metadata,
+		dimensions: (metadata.dimensions ?? []).filter(matches),
+		metrics: (metadata.metrics ?? []).filter(matches),
+	};
+}
+
+function buildMetadataPreview(items: GoogleAnalyticsMetadataItem[]): string[] {
+	if (items.length === 0) {
+		return ["- none"];
+	}
+
+	return items.slice(0, MAX_METADATA_PREVIEW_ITEMS).map((item) => {
+		const pieces = [item.apiName ?? "unknown"];
+		if (item.uiName) {
+			pieces.push(item.uiName);
+		}
+		if (item.customDefinition) {
+			pieces.push("custom");
+		}
+		return `- ${pieces.join(" | ")}`;
+	});
+}
+
+function filterAdminItems(items: JsonObject[], searchQuery?: string): JsonObject[] {
+	if (!searchQuery) {
+		return items;
+	}
+
+	const query = searchQuery.trim().toLowerCase();
+	return items.filter((item) => JSON.stringify(item).toLowerCase().includes(query));
+}
+
+function buildAdminPreview(items: JsonObject[]): string[] {
+	if (items.length === 0) {
+		return ["- none"];
+	}
+
+	return items.slice(0, MAX_ADMIN_PREVIEW_ITEMS).map((item) => `- ${summarizeAdminItem(item)}`);
+}
+
+function summarizeAdminItem(item: JsonObject): string {
+	const candidates = [
+		item.displayName,
+		item.parameterName,
+		item.eventName,
+		item.name,
+		item.resourceName,
+		item.measurementId,
+		item.type,
+	];
+	const primary = candidates.find((value): value is string => typeof value === "string" && value.trim().length > 0);
+	if (primary) {
+		return primary;
+	}
+
+	return JSON.stringify(item);
+}
+
+function describeRequestDateRanges(dateRanges: JsonValue | undefined): string {
+	if (!Array.isArray(dateRanges) || dateRanges.length === 0) {
+		return "none";
+	}
+
+	const parts = dateRanges
+		.filter(isJsonObject)
+		.map((range) => {
+			const startDate = typeof range.startDate === "string" ? range.startDate : "?";
+			const endDate = typeof range.endDate === "string" ? range.endDate : "?";
+			return `${startDate}..${endDate}`;
+		});
+
+	return parts.join(", ");
+}
+
+function buildHelpText(): string {
+	return [
+		"Unsupported /analytics args.",
+		"Use one of:",
+		"- '/analytics'",
+		"- '/analytics 30d'",
+		"- '/analytics 2026-03-01 2026-03-21'",
+		"- '/analytics metadata [search]'",
+		`- '/analytics admin <resource>' where <resource> is one of ${Object.keys(ADMIN_RESOURCE_CONFIG).join(", ")}`,
+		"- '/analytics report {json}'",
+		"- '/analytics pivot {json}'",
+		"- '/analytics funnel {json}'",
+		"- '/analytics realtime {json}'",
+		"- '/analytics help'",
+	].join("\n");
+}
+
+function cloneJsonObject(value: JsonObject): JsonObject {
+	return JSON.parse(JSON.stringify(value)) as JsonObject;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+
+	return String(error);
 }
