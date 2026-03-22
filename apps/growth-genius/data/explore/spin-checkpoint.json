@@ -2,7 +2,7 @@
   "dimensions": [
     { "name": "customEvent:model_id" },
     { "name": "customEvent:credits" },
-    { "name": "customEvent:spin_bucket" }
+    { "name": "customEvent:spins_so_far" }
   ],
   "metrics": [
     { "name": "eventCount" },
@@ -31,10 +31,10 @@
     },
     {
       "dimension": {
-        "dimensionName": "customEvent:spin_bucket",
+        "dimensionName": "customEvent:spins_so_far",
         "orderType": "NUMERIC"
       }
     }
   ],
-  "limit": 500
+  "limit": 10000
 }
