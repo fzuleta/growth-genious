@@ -12,6 +12,7 @@ This plugin owns the `growth-genius` runtime surface.
 
 - Core runtime stays outside `src/plugins/`
 - Plugin source and command handlers stay under `src/plugins/growth-genius`
+- App-specific context lives under `apps/growth-genius/context.md`
 - Plugin outputs are written under `output/growth-genius`
 - Plugin-specific env is loaded from `apps/growth-genius/growth-genius.env`
 - `DISCORD_BOT_KEY` can be defined in the plugin env file for this plugin

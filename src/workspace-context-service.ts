@@ -6,7 +6,8 @@ import { readAgentContextDocuments } from "./context-service";
 
 const WORKSPACE_ROOT = process.cwd();
 const TOP_LEVEL_DOCS = ["README.md", "workspace-template/context.md"];
-const APP_DOCS = ["README.md"];
+const PLUGIN_DOCS = ["README.md"];
+const APP_DOCS = ["context.md"];
 const MAX_SNIPPET_LENGTH = 1600;
 
 export async function retrieveWorkspaceRouteEvidence(input: {
@@ -42,6 +43,12 @@ export async function retrieveWorkspaceRouteEvidence(input: {
 	if (appDocSnippets.length > 0) {
 		summaryParts.push(`Loaded ${appDocSnippets.length} app documentation file${appDocSnippets.length === 1 ? "" : "s"}.`);
 		snippets.push(...appDocSnippets);
+	}
+
+	const appContextSnippets = await loadAppDocSnippets(input.plugin);
+	if (appContextSnippets.length > 0) {
+		summaryParts.push(`Loaded ${appContextSnippets.length} app context file${appContextSnippets.length === 1 ? "" : "s"}.`);
+		snippets.push(...appContextSnippets);
 	}
 
 	const topLevelDocSnippets = await loadTopLevelDocSnippets(input.decision.entityHints.fileHint);
@@ -108,8 +115,37 @@ async function loadPluginDocSnippets(plugin?: PluginContract): Promise<ChatRoute
 	}
 
 	const snippets: ChatRouteEvidence["snippets"] = [];
-	for (const fileName of APP_DOCS) {
+	for (const fileName of PLUGIN_DOCS) {
 		const filePath = path.join(WORKSPACE_ROOT, plugin.rootDir, fileName);
+		if (!(await fileExists(filePath))) {
+			continue;
+		}
+
+		const content = (await readFile(filePath, "utf8")).trim();
+		if (!content) {
+			continue;
+		}
+
+		snippets.push({
+			label: relativeWorkspacePath(filePath),
+			content: truncate(content),
+			sourceType: "workspace",
+			sourcePath: relativeWorkspacePath(filePath),
+		});
+	}
+
+	return snippets;
+}
+
+async function loadAppDocSnippets(plugin?: PluginContract): Promise<ChatRouteEvidence["snippets"]> {
+	if (!plugin) {
+		return [];
+	}
+
+	const appDir = path.dirname(path.join(WORKSPACE_ROOT, plugin.envFilePath));
+	const snippets: ChatRouteEvidence["snippets"] = [];
+	for (const fileName of APP_DOCS) {
+		const filePath = path.join(appDir, fileName);
 		if (!(await fileExists(filePath))) {
 			continue;
 		}
