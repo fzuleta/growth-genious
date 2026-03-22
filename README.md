@@ -245,18 +245,18 @@ One-time setup:
 npm install
 npm run build
 npm link
-veil install
+growth install
 ```
 
 Useful commands:
 
 ```bash
-veil start
-veil stop
-veil restart
-veil status
-veil update
-veil uninstall
+growth start
+growth stop
+growth restart
+growth status
+growth update
+growth uninstall
 ```
 
 ## Notes
