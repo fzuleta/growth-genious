@@ -12,6 +12,7 @@ export interface ChatRouteDecision {
 		modelId?: string;
 		fileHint?: string;
 		customCommandName?: string;
+		customRouteName?: string;
 		topicKeywords: string[];
 		selfModifyIntent?: string;
 	};

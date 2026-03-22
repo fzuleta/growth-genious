@@ -17,6 +17,7 @@ import {
 import { logInfo, logWarn, logError } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
 import { readOptionalContextMarkdown } from "./context-service";
+import { getBuiltinPluginById } from "./plugins";
 import {
 	appendSelfModifyToolCall,
 	createSelfModifySession,
@@ -363,6 +364,7 @@ function buildPlanningSystemPrompt(
 	session: SelfModifySessionDocument,
 	contextMarkdown: string | null,
 ): ResponseInputItem[] {
+	const pluginLabel = resolvePluginLabel(session.pluginId);
 	const items: ResponseInputItem[] = [
 		{
 			role: "system",
@@ -370,7 +372,7 @@ function buildPlanningSystemPrompt(
 				{
 					type: "input_text",
 					text: [
-						"You are an expert coding agent that modifies the growth-genius codebase.",
+						`You are an expert coding agent that modifies the ${pluginLabel}.`,
 						"Your task is to explore the repository and produce a detailed implementation plan.",
 						"Use the provided tools to read files, list directories, and search the codebase.",
 						"When you have enough understanding, call submit_plan with a detailed markdown plan.",
@@ -415,6 +417,7 @@ function buildPlanningSystemPrompt(
 }
 
 function buildExecutionSystemPrompt(session: SelfModifySessionDocument): ResponseInputItem[] {
+	const pluginLabel = resolvePluginLabel(session.pluginId);
 	const items: ResponseInputItem[] = [
 		{
 			role: "system",
@@ -422,7 +425,7 @@ function buildExecutionSystemPrompt(session: SelfModifySessionDocument): Respons
 				{
 					type: "input_text",
 					text: [
-						"You are an expert coding agent executing an approved implementation plan.",
+						`You are an expert coding agent executing an approved implementation plan for the ${pluginLabel}.`,
 						"Use the provided tools to read, write, and edit files in the codebase.",
 						"Follow the plan precisely. When all changes are complete, call the done tool.",
 						"Write clean, idiomatic TypeScript. Match existing codestyle (tabs, semicolons, etc).",
@@ -445,6 +448,15 @@ function buildExecutionSystemPrompt(session: SelfModifySessionDocument): Respons
 	});
 
 	return items;
+}
+
+function resolvePluginLabel(pluginId: string): string {
+	const plugin = getBuiltinPluginById(pluginId);
+	if (!plugin) {
+		return `plugin '${pluginId}' codebase`;
+	}
+
+	return `${plugin.name} codebase`;
 }
 
 // ── Helpers ──

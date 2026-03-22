@@ -2,6 +2,7 @@ import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { readOptionalContextMarkdown } from "./context-service";
 import { logInfo } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
+import { getBuiltinPluginById } from "./plugins";
 import { ANALYSIS_TOOLS, executeToolCall } from "./self-modify-tools";
 
 const MAX_ANALYSIS_ITERATIONS = 20;
@@ -14,6 +15,7 @@ export async function runCodeAnalysis(input: {
 	request: string;
 	username: string;
 	channelId: string;
+	pluginId?: string;
 }): Promise<string> {
 	const model = getAnalysisModel();
 	const contextMarkdown = await readOptionalContextMarkdown();
@@ -76,9 +78,11 @@ function buildAnalysisPrompt(
 		request: string;
 		username: string;
 		channelId: string;
+		pluginId?: string;
 	},
 	contextMarkdown: string | null,
 ): ResponseInputItem[] {
+	const pluginLabel = resolvePluginLabel(input.pluginId);
 	const items: ResponseInputItem[] = [
 		{
 			role: "system",
@@ -86,7 +90,7 @@ function buildAnalysisPrompt(
 				{
 					type: "input_text",
 					text: [
-						"You are an expert read-only code analysis agent for the growth-genius repository.",
+						`You are an expert read-only code analysis agent for the ${pluginLabel}.`,
 						"Use the provided tools to inspect source files, related code, and nearby patterns before answering.",
 						"Do not propose made-up details. Ground every recommendation in the actual code you inspected.",
 						"Do not modify files. You are analysis-only.",
@@ -121,4 +125,17 @@ function buildAnalysisPrompt(
 	});
 
 	return items;
+}
+
+function resolvePluginLabel(pluginId?: string): string {
+	if (!pluginId) {
+		return "active app repository";
+	}
+
+	const plugin = getBuiltinPluginById(pluginId);
+	if (!plugin) {
+		return `plugin '${pluginId}' repository`;
+	}
+
+	return `${plugin.name} repository`;
 }

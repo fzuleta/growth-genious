@@ -8,7 +8,7 @@ import {
 	type Message,
 } from "discord.js";
 import { loadCurrentPlugin, listAvailablePlugins } from "./plugin-loader";
-import { getMissingEnvVars } from "./plugin-contract";
+import { ensurePluginOutputDir, getMissingEnvVars, resolvePluginRootDir } from "./plugin-contract";
 import { generateChatReply } from "./chat-service";
 import { retrieveDbRouteEvidence } from "./chat-db-query-service";
 import { classifyChatRoute } from "./chat-router-service";
@@ -80,7 +80,7 @@ client.once("ready", () => {
 		assistantName: currentPlugin.name,
 		pluginEnvFilePath: currentPlugin.envFilePath,
 		pluginEnvLoaded: runtimeEnv.pluginEnvLoaded,
-		enabledPlugins: availablePlugins.map((plugin) => plugin.id),
+		registeredPlugins: availablePlugins.map((plugin) => plugin.id),
 		botUser: client.user?.tag ?? null,
 		allowedChannelIds: Array.from(allowedChannelIds),
 		commandUserId,
@@ -306,14 +306,15 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 
 		if (routeDecision.route === "custom" && customRouteHandler) {
 			await persistInboundChatContent(database, lastMessage, combinedContent);
+			const outputDir = await ensurePluginOutputDir(currentPlugin);
 			const customReply = await customRouteHandler({
 				plugin: currentPlugin,
 				database,
 				message: lastMessage,
 				content: combinedContent,
 				args: "",
-				pluginRootDir: currentPlugin.rootDir,
-				outputDir: currentPlugin.outputDir,
+				pluginRootDir: resolvePluginRootDir(currentPlugin),
+				outputDir,
 			});
 			if (customReply.trim().length > 0) {
 				await replyToMessage(database, lastMessage, customReply, "chat");
@@ -369,6 +370,7 @@ async function handleCodeAnalysis(
 			request,
 			username: message.author.username,
 			channelId: message.channelId,
+			pluginId: currentPlugin.id,
 		});
 
 		await replyToMessage(database, message, analysis, "chat");

@@ -3,7 +3,7 @@ import type { PluginContract, PluginRouteHandler, PluginRouteMatch } from "./plu
 import type { ChatRouteDecision } from "./chat-routing-types";
 import { logWarn } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
-import { resolvePluginRouteMatch } from "./plugin-contract";
+import { listPluginCustomRoutes, resolvePluginCustomRouteByName, resolvePluginRouteMatch } from "./plugin-contract";
 
 const DEFAULT_ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
 const DIRECT_CONVERSATION_MAX_LENGTH = 24;
@@ -26,6 +26,7 @@ export async function classifyChatRoute(input: {
 		channelId: input.channelId,
 		username: input.username,
 		content: normalizedContent,
+		plugin: input.plugin,
 	});
 
 	if (!normalizedContent) {
@@ -71,6 +72,29 @@ export async function classifyChatRoute(input: {
 
 		const llmDecision = parseClassifierOutput(response.output_text, normalizedContent);
 		const enriched = await enrichDecisionWithThemeResolver(llmDecision, normalizedContent);
+		const declaredCustomRoute = resolveDeclaredCustomRoute(input.plugin, enriched, {
+			content: normalizedContent,
+			channelId: input.channelId,
+			username: input.username,
+		});
+		if (declaredCustomRoute) {
+			return {
+				decision: buildCustomRouteDecision(declaredCustomRoute, normalizedContent),
+				model: DEFAULT_ROUTER_MODEL,
+				promptInput,
+				customRouteHandler: declaredCustomRoute.handle,
+			};
+		}
+
+		if (enriched.route === "custom") {
+			return {
+				decision: buildFallbackDecision("conversation", normalizedContent, "unknown-plugin-custom-route"),
+				model: DEFAULT_ROUTER_MODEL,
+				promptInput,
+				customRouteHandler: null,
+			};
+		}
+
 		return {
 			decision: enriched,
 			model: DEFAULT_ROUTER_MODEL,
@@ -100,7 +124,9 @@ async function buildChatRoutePromptInput(input: {
 	channelId: string;
 	username: string;
 	content: string;
+	plugin?: PluginContract;
 }): Promise<ResponseInputItem[]> {
+	const pluginCustomRoutes = input.plugin ? listPluginCustomRoutes(input.plugin) : [];
 	return [
 		{
 			role: "system",
@@ -108,16 +134,20 @@ async function buildChatRoutePromptInput(input: {
 				{
 					type: "input_text",
 					text: [
-						"You classify a Discord message into one of five routes.",
+						"You classify a Discord message into one of six routes.",
 						"Return strict JSON only with keys route, confidence, subject, requestedSources, entityHints, reason.",
-						"Allowed route values: conversation, db-query, workspace-question, self-modify, code-analysis.",
+						"Allowed route values: conversation, db-query, workspace-question, self-modify, code-analysis, custom.",
 						"Use db-query whenever the answer likely depends on MongoDB-backed history, jobs, prior chat, memory, prior bot actions, user-specific history, or anything about what happened before.",
 						"Use workspace-question for repository docs, workspace templates, configuration, source tree layout, or other repository facts that need retrieval.",
 						"Use code-analysis when the user wants you to inspect source code, review an implementation, analyze a file, or provide recommendations without modifying code.",
 						"Use self-modify when the user is asking the bot to write code, implement features, fix bugs, refactor source files, add plugin support, or make any change to the codebase itself.",
+						pluginCustomRoutes.length > 0
+							? "Use custom when the message clearly matches one of the active plugin custom routes. When you do, set entityHints.customRouteName to the exact declared route name."
+							: "Only use custom when the active plugin explicitly exposes a custom route.",
 						"Use conversation for general chat, brainstorming, or anything not requiring retrieval or code changes.",
 						"For db-query, prefer broad retrieval when uncertain rather than falling back too early.",
-						"entityHints must be an object with optional jobId, optional modelId, optional fileHint, optional selfModifyIntent (brief description of the requested code change), and topicKeywords as an array of short strings.",
+						"entityHints must be an object with optional jobId, optional modelId, optional fileHint, optional customRouteName, optional selfModifyIntent (brief description of the requested code change), and topicKeywords as an array of short strings.",
+						pluginCustomRoutes.length > 0 ? formatPluginCustomRouteInstructions(pluginCustomRoutes) : "",
 						"Do not answer the user. Do not include markdown. Keep subject short and concrete.",
 				].filter(Boolean).join(" "),
 				},
@@ -269,6 +299,7 @@ function buildCustomRouteDecision(match: PluginRouteMatch, content: string): Cha
 		entityHints: {
 			fileHint: inferFileHint(content),
 			customCommandName: match.commandName?.trim() || undefined,
+			customRouteName: match.routeName?.trim() || undefined,
 			topicKeywords: buildTopicKeywords(content),
 		},
 		reason: match.reason?.trim() || "custom-route-callback",
@@ -322,6 +353,10 @@ function parseClassifierOutput(outputText: string, fallbackContent: string): Cha
 					typeof parsed.entityHints?.customCommandName === "string"
 						? parsed.entityHints.customCommandName.trim()
 						: undefined,
+				customRouteName:
+					typeof parsed.entityHints?.customRouteName === "string"
+						? parsed.entityHints.customRouteName.trim()
+						: undefined,
 				topicKeywords,
 				selfModifyIntent:
 					typeof parsed.entityHints?.selfModifyIntent === "string"
@@ -356,6 +391,48 @@ function buildFallbackDecision(route: ChatRouteDecision["route"], content: strin
 		},
 		reason,
 	};
+}
+
+function resolveDeclaredCustomRoute(
+	plugin: PluginContract | undefined,
+	decision: ChatRouteDecision,
+	input: {
+		content: string;
+		channelId: string;
+		username: string;
+	},
+): PluginRouteMatch | null {
+	if (!plugin || decision.route !== "custom") {
+		return null;
+	}
+
+	const routeName = decision.entityHints.customRouteName?.trim() || decision.subject.trim();
+	if (!routeName) {
+		return null;
+	}
+
+	try {
+		return resolvePluginCustomRouteByName(plugin, routeName);
+	} catch (error: unknown) {
+		logWarn("Plugin custom route resolution failed; falling back to conversation", {
+			channelId: input.channelId,
+			username: input.username,
+			message: error instanceof Error ? error.message : String(error),
+		});
+		return null;
+	}
+}
+
+function formatPluginCustomRouteInstructions(routes: ReturnType<typeof listPluginCustomRoutes>): string {
+	return [
+		"Active plugin custom routes:",
+		...routes.map((route) => {
+			const examples = route.examples?.filter((value) => value.trim().length > 0) ?? [];
+			return examples.length > 0
+				? `${route.name}: ${route.description}. Examples: ${examples.join(" | ")}.`
+				: `${route.name}: ${route.description}.`;
+		}),
+	].join(" ");
 }
 
 function extractModelId(content: string): string | null {

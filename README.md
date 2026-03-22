@@ -1,12 +1,12 @@
 # Growth Genius
 
-Discord-based workspace assistant core for repository Q&A, code analysis, memory-backed chat, controlled self-modification, and plugin-scoped command routing.
+Discord-based workspace assistant core for repository Q&A, code analysis, memory-backed chat, controlled self-modification, and app-scoped command routing.
 
 ## What remains in this repo
 
 - `src/bot.ts`: Discord bot entrypoint
 - `src/plugin-contract.ts`: runtime plugin contract for identity, directories, env requirements, and command routing
-- `src/plugin-loader.ts`: active plugin loading and enablement checks
+- `src/plugin-loader.ts`: active plugin loading and startup validation
 - `src/plugins/`: plugin-owned commands and docs
 - `src/chat-service.ts`: grounded chat prompt assembly and reply generation
 - `src/chat-router-service.ts`: route classification for conversation, DB lookup, workspace retrieval, code analysis, and self-modify
@@ -58,7 +58,8 @@ Current bot behavior:
 - Core runtime lives in the top-level `src/` services such as the bot, router, chat, memory, db, and self-modify services.
 - Plugin implementations live under `src/plugins/`.
 - Plugin-specific env lives under `apps/<plugin-folder>/`.
-- This separation is intended to make enable/disable and install/uninstall flows feasible later without pushing plugin logic into the core runtime.
+- The runtime supports exactly one active plugin per repo download so freechat routing and memory stay scoped to a single app purpose.
+- App-level decision-tree extensions are supported through plugin-owned commands and an optional `routeRequest` callback that runs before the shared classifier.
 
 ## Plugin Contract
 
@@ -74,6 +75,7 @@ Current required fields:
 - `outputDir`: plugin-owned artifact directory
 - `requiredEnv`: plugin-level env requirements
 - `commands`: plugin-owned slash-style commands such as `/analytics`
+- `customRoutes`: declarative app-level routes that the shared classifier can target with `route=custom`
 - `routeRequest(input)`: optional callback invoked after command matching and before the default router heuristics/LLM classifier
 
 Current contract shape:
@@ -88,6 +90,7 @@ export interface PluginContract {
 	outputDir: string;
 	requiredEnv: string[];
 	commands: PluginCommand[];
+	customRoutes?: PluginCustomRoute[];
 	routeRequest?: (input: PluginRouteRequest) => Promise<PluginRouteMatch | null> | PluginRouteMatch | null;
 }
 ```
@@ -115,6 +118,7 @@ Accepted forms:
 - Legacy fallback still works for `apps/{plugin-id}.env`
 - Plugin env values override `.env` values for the active plugin
 - `DISCORD_BOT_KEY` may be defined in either `.env` or the active plugin env file
+- Exactly one plugin is active per repo download, selected by `PLUGIN_ID`.
 
 Example for the current app:
 
@@ -125,8 +129,35 @@ apps/growth-genius/growth-genius.env
 Plugin selection env:
 
 - `PLUGIN_ID`: active plugin id
-- `ENABLED_PLUGINS`: comma-separated list of enabled builtin plugins
-```
+- `APP_ID`: legacy alias for `PLUGIN_ID`
+
+`ENABLED_PLUGINS` is no longer supported.
+
+## App Context
+
+- Shared agent context can live under `agent/*.md`.
+- App-specific operating context lives under `apps/<plugin-folder>/context.md`.
+- App-specific reference docs can live under the plugin root, for example `src/plugins/growth-genius/README.md`.
+- The primary operating context merges the active app context with shared agent docs, while workspace retrieval can separately load app docs as evidence.
+
+## App-Level Routing
+
+- Use `commands` for explicit slash-style app commands such as `/analytics`.
+- Use `customRoutes` for declarative app-specific branches that the shared classifier can target with `route=custom`.
+- Use `routeRequest` for imperative or highly dynamic routing that should run before the shared heuristic/LLM classifier.
+- This keeps the shared decision tree centralized while allowing the active app to own selected branches of the routing behavior.
+
+## New App Workflow
+
+To repurpose a cloned repo for a new app purpose:
+
+1. Create a new plugin module under `src/plugins/<plugin-id>/`.
+2. Create an app folder under `apps/<plugin-id>/` with `<plugin-id>.env` and `context.md`.
+3. Register the plugin explicitly in `src/plugins/index.ts`.
+4. Set `PLUGIN_ID=<plugin-id>` in `.env` or the deployment environment.
+5. Start the bot and confirm startup logs show the intended active plugin.
+
+Starter scaffold files live under `workspace-template/app-template/`.
 
 ## Required env
 

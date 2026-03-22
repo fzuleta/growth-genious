@@ -45,8 +45,19 @@ export interface PluginCommand {
 
 export type PluginRouteHandler = (input: PluginCommandContext) => Promise<string>;
 
+export interface PluginCustomRoute {
+	name: string;
+	description: string;
+	examples?: string[];
+	subject?: string;
+	confidence?: ChatRouteConfidence;
+	requestedSources?: string[];
+	handle: PluginRouteHandler;
+}
+
 export interface PluginRouteMatch {
 	commandName?: string;
+	routeName?: string;
 	subject: string;
 	confidence?: ChatRouteConfidence;
 	requestedSources?: string[];
@@ -63,6 +74,7 @@ export interface PluginContract {
 	outputDir: string;
 	requiredEnv: string[];
 	commands: PluginCommand[];
+	customRoutes?: PluginCustomRoute[];
 	routeRequest?: (input: PluginRouteRequest) => Promise<PluginRouteMatch | null> | PluginRouteMatch | null;
 }
 
@@ -123,6 +135,31 @@ export function resolvePluginRouteMatch(plugin: PluginContract, input: PluginRou
 	}
 
 	return null;
+}
+
+export function listPluginCustomRoutes(plugin: PluginContract): PluginCustomRoute[] {
+	return plugin.customRoutes ?? [];
+}
+
+export function resolvePluginCustomRouteByName(plugin: PluginContract, routeName: string): PluginRouteMatch | null {
+	const normalizedRouteName = routeName.trim().toLowerCase();
+	if (!normalizedRouteName) {
+		return null;
+	}
+
+	const route = listPluginCustomRoutes(plugin).find((value) => value.name.trim().toLowerCase() === normalizedRouteName);
+	if (!route) {
+		return null;
+	}
+
+	return {
+		routeName: route.name,
+		subject: route.subject?.trim() || route.name,
+		confidence: route.confidence ?? "high",
+		requestedSources: route.requestedSources ?? [],
+		reason: "plugin-custom-route-declared",
+		handle: route.handle,
+	};
 }
 
 function matchSlashCommand(content: string, commandName: string): PluginCommandMatch | null {

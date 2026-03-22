@@ -12,6 +12,7 @@ export interface RuntimeEnvLoadResult {
 }
 
 export function loadRuntimeEnv(): RuntimeEnvLoadResult {
+	assertSinglePluginConfiguration(process.env);
 	const baseEnvPath = path.resolve(process.cwd(), ".env");
 	dotenv.config({ path: baseEnvPath });
 
@@ -32,21 +33,11 @@ export function readActivePluginId(env: NodeJS.ProcessEnv = process.env): string
 	return pluginId && pluginId.length > 0 ? pluginId : DEFAULT_PLUGIN_ID;
 }
 
-export function readEnabledPluginIds(
-	env: NodeJS.ProcessEnv = process.env,
-	availablePluginIds: string[] = [],
-): string[] {
-	const rawValue = env.ENABLED_PLUGINS?.trim();
-	if (!rawValue) {
-		return availablePluginIds.length > 0 ? [...availablePluginIds] : [readActivePluginId(env)];
+
+export function assertSinglePluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
+	if (env.ENABLED_PLUGINS?.trim()) {
+		throw new Error("ENABLED_PLUGINS is no longer supported. Configure exactly one active plugin with PLUGIN_ID.");
 	}
-
-	const values = rawValue
-		.split(",")
-		.map((value) => value.trim())
-		.filter((value) => value.length > 0);
-
-	return values.length > 0 ? Array.from(new Set(values)) : [readActivePluginId(env)];
 }
 
 export function getPluginEnvFilePath(pluginId: string): string {
