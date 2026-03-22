@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const SERVICE_LABEL = "com.fezuone.veil.bot";
+const SERVICE_LABEL = "co.fezuone.veil.bot";
 const repoRoot = path.resolve(__dirname, "..");
 const distBotPath = path.join(repoRoot, "dist", "bot.js");
 const launchAgentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
