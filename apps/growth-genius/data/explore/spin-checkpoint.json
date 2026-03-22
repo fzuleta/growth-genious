@@ -1,5 +1,5 @@
 {
-  "dimensions": [
+  "dimensions": [ 
     { "name": "customEvent:model_id" },
     { "name": "customEvent:credits" },
     { "name": "customEvent:spins_so_far" }
