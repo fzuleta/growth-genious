@@ -13,7 +13,7 @@ export const growthGeniusPlugin: PluginContract = {
 	resolveAiTaskConfig: (task, env = process.env) => {
 		switch (task) {
 			case "agent":
-				return { provider: "openai", model: env.OPENAI_AGENT_MODEL?.trim() || env.OPENAI_MODEL?.trim() || "gpt-4o" };
+				return { model: env.OPENAI_AGENT_MODEL?.trim() || env.OPENAI_MODEL?.trim() || "gpt-4o" };
 			case "analytics-summary":
 				return { model: env.OPENAI_ANALYTICS_MODEL?.trim() || env.OPENAI_MODEL?.trim() || "gpt-4o" };
 			case "analytics-intent":

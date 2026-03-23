@@ -13,6 +13,8 @@ type ChatMessage = {
 	toolCallId?: string;
 };
 
+export type CompatibleChatMessage = ChatMessage;
+
 type ResolveCoreTextModel = (env: NodeJS.ProcessEnv) => string;
 
 const CORE_TEXT_MODEL_RESOLVERS: Record<AiTextTask, ResolveCoreTextModel> = {
@@ -156,7 +158,7 @@ async function generateOpenRouterText(model: string, input: ResponseInputItem[])
 	return (await result.getText()).trim();
 }
 
-function convertResponseInputToChatMessages(input: ResponseInputItem[]): ChatMessage[] {
+export function convertResponseInputToChatMessages(input: ResponseInputItem[]): ChatMessage[] {
 	const messages: ChatMessage[] = [];
 
 	for (const item of input) {

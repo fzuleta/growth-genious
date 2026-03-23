@@ -242,8 +242,9 @@ If `MONGODB_URI` is not set, the bot builds a connection string from the `mongo_
 Current provider behavior:
 
 - Text-only tasks such as chat, routing, memory, next-step suggestions, and analytics summaries can use `AI_PROVIDER=openrouter`.
-- Tool-loop agent tasks such as code analysis and self-modify still require the OpenAI Responses provider.
-- In the built-in `growth-genius` plugin, the `agent` task is pinned to `provider=openai`, so `OPENAI_API_KEY` is still required for code-analysis and self-modify even when the default `AI_PROVIDER` is `openrouter`.
+- Tool-loop agent tasks such as code analysis and self-modify now use the shared provider-aware agent runtime as well.
+- If you route `agent` tasks through OpenRouter, use a model that supports tool calling and structured multi-step execution.
+- `OPENAI_API_KEY` is only required when the resolved provider for a task is `openai`.
 
 ## macOS service wrapper
 

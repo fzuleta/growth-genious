@@ -14,9 +14,8 @@ import {
 	getDiffStat,
 	hasUncommittedChanges,
 } from "./helpers/git";
-import { resolveOpenAiTaskConfig } from "./ai/text-router";
+import { runAgentLoop } from "./ai/agent-runtime";
 import { logInfo, logWarn, logError } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 import { readOptionalContextMarkdown } from "./context-service";
 import { getBuiltinPluginById } from "./plugins";
 import {
@@ -29,11 +28,7 @@ import {
 	type SelfModifyToolCall,
 } from "./db/self-modify-mongo";
 import { buildChatSessionKey, type SmediaMongoDatabase } from "./db/mongo";
-import {
-	PLANNING_TOOLS,
-	EXECUTION_TOOLS,
-	executeToolCall,
-} from "./self-modify-tools";
+import { type ToolCallResult } from "./self-modify-tools";
 
 const MAX_PLANNING_ITERATIONS = 25;
 const MAX_EXECUTION_ITERATIONS = 40;
@@ -204,70 +199,26 @@ async function runPlanningLoop(
 	session: SelfModifySessionDocument,
 ): Promise<string> {
 	const plugin = getBuiltinPluginById(session.pluginId);
-	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const conversationItems: ResponseInputItem[] = buildPlanningSystemPrompt(session, contextMarkdown);
+	const result = await runAgentLoop({
+		task: "agent",
+		plugin,
+		conversationItems,
+		toolSet: "planning",
+		maxIterations: MAX_PLANNING_ITERATIONS,
+		onToolResult: async (event) => {
+			await persistSelfModifyToolCall(database, session, "planning", event.tool, event.args, event.result);
+		},
+	});
 
-	const client = createOpenAIClient();
-	let plan: string | null = null;
+	logInfo("Self-modify: planning completed", {
+		sessionId: session.sessionId,
+		provider: result.provider,
+		model: result.model,
+	});
 
-	for (let i = 0; i < MAX_PLANNING_ITERATIONS; i++) {
-		logInfo("Self-modify: planning iteration", {
-			sessionId: session.sessionId,
-			iteration: i + 1,
-			model,
-		});
-
-		const response = await client.responses.create({
-			model,
-			input: conversationItems,
-			tools: PLANNING_TOOLS,
-		});
-
-		const functionCalls = response.output.filter(
-			(item): item is typeof item & { type: "function_call" } => item.type === "function_call",
-		);
-
-		if (functionCalls.length === 0) {
-			plan = response.output_text.trim();
-			break;
-		}
-
-		for (const call of response.output) {
-			conversationItems.push(call as unknown as ResponseInputItem);
-		}
-
-		for (const call of functionCalls) {
-			const args = JSON.parse(call.arguments) as Record<string, unknown>;
-			const result = await executeToolCall(call.name, args);
-
-			const toolCallDoc: SelfModifyToolCall = {
-				tool: call.name,
-				args,
-				result: result.output.slice(0, 2000),
-				phase: "planning",
-				createdAt: new Date(),
-			};
-			await appendSelfModifyToolCall(database, session.sessionId, toolCallDoc, "planning");
-
-			conversationItems.push({
-				type: "function_call_output",
-				call_id: call.call_id,
-				output: result.output,
-			} as unknown as ResponseInputItem);
-
-			if (result.isTerminal && result.terminalPayload) {
-				plan = result.terminalPayload;
-				break;
-			}
-		}
-
-		if (plan) break;
-	}
-
-	if (!plan) {
-		plan = "Planning loop exhausted max iterations without producing a plan.";
-	}
+	const plan = result.output || "Planning loop exhausted max iterations without producing a plan.";
 
 	await updateSelfModifyState(database, session.sessionId, "awaiting-approval", { plan });
 	return plan;
@@ -280,81 +231,54 @@ async function runExecutionLoop(
 	session: SelfModifySessionDocument,
 ): Promise<string> {
 	const plugin = getBuiltinPluginById(session.pluginId);
-	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const conversationItems: ResponseInputItem[] = buildExecutionSystemPrompt(session);
-
-	const client = createOpenAIClient();
-	let summary: string | null = null;
 	const filesChanged = new Set<string>();
-
-	for (let i = 0; i < MAX_EXECUTION_ITERATIONS; i++) {
-		logInfo("Self-modify: execution iteration", {
-			sessionId: session.sessionId,
-			iteration: i + 1,
-			model,
-		});
-
-		const response = await client.responses.create({
-			model,
-			input: conversationItems,
-			tools: EXECUTION_TOOLS,
-		});
-
-		const functionCalls = response.output.filter(
-			(item): item is typeof item & { type: "function_call" } => item.type === "function_call",
-		);
-
-		if (functionCalls.length === 0) {
-			summary = response.output_text.trim();
-			break;
-		}
-
-		for (const call of response.output) {
-			conversationItems.push(call as unknown as ResponseInputItem);
-		}
-
-		for (const call of functionCalls) {
-			const args = JSON.parse(call.arguments) as Record<string, unknown>;
-			const result = await executeToolCall(call.name, args);
-
-			if (call.name === "write_file" || call.name === "edit_file") {
-				const filePath = args.path as string;
-				if (filePath) filesChanged.add(filePath);
+	const result = await runAgentLoop({
+		task: "agent",
+		plugin,
+		conversationItems,
+		toolSet: "execution",
+		maxIterations: MAX_EXECUTION_ITERATIONS,
+		onToolResult: async (event) => {
+			const filePath = event.args.path;
+			if ((event.tool === "write_file" || event.tool === "edit_file") && typeof filePath === "string" && filePath.trim()) {
+				filesChanged.add(filePath);
 			}
+			await persistSelfModifyToolCall(database, session, "executing", event.tool, event.args, event.result);
+		},
+	});
 
-			const toolCallDoc: SelfModifyToolCall = {
-				tool: call.name,
-				args,
-				result: result.output.slice(0, 2000),
-				phase: "executing",
-				createdAt: new Date(),
-			};
-			await appendSelfModifyToolCall(database, session.sessionId, toolCallDoc, "executing");
+	logInfo("Self-modify: execution completed", {
+		sessionId: session.sessionId,
+		provider: result.provider,
+		model: result.model,
+	});
 
-			conversationItems.push({
-				type: "function_call_output",
-				call_id: call.call_id,
-				output: result.output,
-			} as unknown as ResponseInputItem);
-
-			if (result.isTerminal && result.terminalPayload) {
-				summary = result.terminalPayload;
-				break;
-			}
-		}
-
-		if (summary) break;
-	}
-
-	if (!summary) {
-		summary = "Execution loop completed max iterations.";
-	}
+	const summary = result.output || "Execution loop completed max iterations.";
 
 	await updateSelfModifyState(database, session.sessionId, "executing", {
 		filesChanged: Array.from(filesChanged),
 	});
 
 	return summary;
+}
+
+async function persistSelfModifyToolCall(
+	database: SmediaMongoDatabase,
+	session: SelfModifySessionDocument,
+	phase: "planning" | "executing",
+	tool: string,
+	args: Record<string, unknown>,
+	result: ToolCallResult,
+): Promise<void> {
+	const toolCallDoc: SelfModifyToolCall = {
+		tool,
+		args,
+		result: result.output.slice(0, 2000),
+		phase,
+		createdAt: new Date(),
+	};
+	await appendSelfModifyToolCall(database, session.sessionId, toolCallDoc, phase);
 }
 
 // ── System prompts ──

@@ -1,10 +1,8 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
-import { resolveOpenAiTaskConfig } from "./ai/text-router";
+import { runAgentLoop } from "./ai/agent-runtime";
 import { readOptionalContextMarkdown } from "./context-service";
 import { logInfo } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 import { getBuiltinPluginById } from "./plugins";
-import { ANALYSIS_TOOLS, executeToolCall } from "./self-modify-tools";
 
 const MAX_ANALYSIS_ITERATIONS = 20;
 
@@ -15,60 +13,24 @@ export async function runCodeAnalysis(input: {
 	pluginId?: string;
 }): Promise<string> {
 	const plugin = input.pluginId ? getBuiltinPluginById(input.pluginId) : null;
-	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const conversationItems: ResponseInputItem[] = buildAnalysisPrompt(input, contextMarkdown);
-	const client = createOpenAIClient();
-	let analysis: string | null = null;
+	const result = await runAgentLoop({
+		task: "agent",
+		plugin,
+		conversationItems,
+		toolSet: "analysis",
+		maxIterations: MAX_ANALYSIS_ITERATIONS,
+	});
 
-	for (let i = 0; i < MAX_ANALYSIS_ITERATIONS; i++) {
-		logInfo("Code-analysis iteration", {
-			iteration: i + 1,
-			model,
-			channelId: input.channelId,
-			username: input.username,
-		});
+	logInfo("Code-analysis completed", {
+		provider: result.provider,
+		model: result.model,
+		channelId: input.channelId,
+		username: input.username,
+	});
 
-		const response = await client.responses.create({
-			model,
-			input: conversationItems,
-			tools: ANALYSIS_TOOLS,
-		});
-
-		const functionCalls = response.output.filter(
-			(item): item is typeof item & { type: "function_call" } => item.type === "function_call",
-		);
-
-		if (functionCalls.length === 0) {
-			analysis = response.output_text.trim();
-			break;
-		}
-
-		for (const call of response.output) {
-			conversationItems.push(call as unknown as ResponseInputItem);
-		}
-
-		for (const call of functionCalls) {
-			const args = JSON.parse(call.arguments) as Record<string, unknown>;
-			const result = await executeToolCall(call.name, args);
-			conversationItems.push({
-				type: "function_call_output",
-				call_id: call.call_id,
-				output: result.output,
-			} as unknown as ResponseInputItem);
-
-			if (result.isTerminal && result.terminalPayload) {
-				analysis = result.terminalPayload;
-				break;
-			}
-		}
-
-		if (analysis) {
-			break;
-		}
-	}
-
-	return analysis ?? "I inspected the code but could not produce a grounded analysis within the iteration limit.";
+	return result.output || "I inspected the code but could not produce a grounded analysis within the iteration limit.";
 }
 
 function buildAnalysisPrompt(
