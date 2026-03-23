@@ -1097,6 +1097,49 @@ export async function listRecentShortTermSummariesForUser(
 		.toArray();
 }
 
+export async function searchMemoryEntries(
+	database: SmediaMongoDatabase,
+	input: {
+		pluginId: string;
+		keywords: string[];
+		kinds?: MemoryEntryKind[];
+		scope?: MemoryEntryScope;
+		userId?: string;
+		limit: number;
+	},
+): Promise<MemoryEntryDocument[]> {
+	const cleanedKeywords = Array.from(
+		new Set(input.keywords.map((keyword) => keyword.trim()).filter((keyword) => keyword.length > 0)),
+	);
+	if (cleanedKeywords.length === 0) {
+		return [];
+	}
+
+	const filter: Document = {
+		pluginId: input.pluginId,
+		content: {
+			$regex: cleanedKeywords.map(escapeRegex).join("|"),
+			$options: "i",
+		},
+	};
+
+	if (input.kinds && input.kinds.length > 0) {
+		filter.kind = { $in: input.kinds };
+	}
+	if (input.scope) {
+		filter.scope = input.scope;
+	}
+	if (input.userId) {
+		filter["metadata.participantUserIds"] = input.userId;
+	}
+
+	return database.collections.memoryEntries
+		.find(filter)
+		.sort({ updatedAt: -1 })
+		.limit(input.limit)
+		.toArray();
+}
+
 export async function searchChatMessages(
 	database: SmediaMongoDatabase,
 	input: {
@@ -1410,6 +1453,12 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 				key: { sourceSessionId: 1 },
 				name: "sourceSessionId",
 				sparse: true,
+			},
+			{
+				key: { updatedAt: 1 },
+				name: "short_term_summary_ttl_60d",
+				expireAfterSeconds: 2 * DEFAULT_RETENTION_TTL_SECONDS,
+				partialFilterExpression: { kind: "short-term-summary" },
 			},
 		]),
 		collections.memoryCheckpoints.createIndexes([

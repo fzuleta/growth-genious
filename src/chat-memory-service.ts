@@ -276,12 +276,16 @@ async function consolidateSessionMemory(input: {
 
 	const previousWords = latestShortTerm ? latestShortTerm.content.split(/\s+/).length : 0;
 	const newWords = summaryContent.split(/\s+/).length;
+	const qualityCoverage = measureKeywordCoverage(sourceMessages, summaryContent);
 	logInfo("Short-term memory consolidation metrics", {
 		sessionKey: input.sessionKey,
 		previousWords,
 		newWords,
 		sourceMessageCount: sourceMessages.length,
 		wordLimit: SHORT_TERM_WORD_LIMIT,
+		keywordCoverage: qualityCoverage.coverageRatio,
+		keywordsFound: qualityCoverage.found,
+		keywordsMissed: qualityCoverage.missed,
 	});
 	const createdAt = sourceMessages[sourceMessages.length - 1]?.createdAt ?? new Date();
 	const participants = collectParticipants(sourceMessages);
@@ -655,4 +659,60 @@ function trimToWordLimit(text: string, limit: number): string {
 
 function getChatMemoryModel(plugin?: PluginContract | null): string {
 	return resolveAiTextModel("memory", { plugin });
+}
+
+const STOPWORDS = new Set([
+	"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+	"have", "has", "had", "do", "does", "did", "will", "would", "could",
+	"should", "may", "might", "shall", "can", "need", "dare", "ought",
+	"to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+	"into", "through", "during", "before", "after", "above", "below",
+	"between", "out", "off", "over", "under", "again", "further", "then",
+	"once", "here", "there", "when", "where", "why", "how", "all", "each",
+	"every", "both", "few", "more", "most", "other", "some", "such", "no",
+	"not", "only", "own", "same", "so", "than", "too", "very", "just",
+	"because", "but", "and", "or", "if", "while", "about", "up", "it",
+	"its", "this", "that", "these", "those", "i", "me", "my", "we", "our",
+	"you", "your", "he", "him", "his", "she", "her", "they", "them", "their",
+	"what", "which", "who", "whom", "this", "that", "am", "also", "like",
+]);
+
+function extractKeywords(text: string): Set<string> {
+	const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/);
+	const keywords = new Set<string>();
+	for (const w of words) {
+		if (w.length >= 3 && !STOPWORDS.has(w)) {
+			keywords.add(w);
+		}
+	}
+	return keywords;
+}
+
+function measureKeywordCoverage(
+	sourceMessages: ChatMessageDocument[],
+	summary: string,
+): { coverageRatio: number; found: number; missed: number } {
+	const sourceText = sourceMessages.map((m) => m.content).join(" ");
+	const sourceKeywords = extractKeywords(sourceText);
+	const summaryKeywords = extractKeywords(summary);
+
+	if (sourceKeywords.size === 0) {
+		return { coverageRatio: 1, found: 0, missed: 0 };
+	}
+
+	let found = 0;
+	let missed = 0;
+	for (const kw of sourceKeywords) {
+		if (summaryKeywords.has(kw)) {
+			found++;
+		} else {
+			missed++;
+		}
+	}
+
+	return {
+		coverageRatio: Math.round((found / sourceKeywords.size) * 100) / 100,
+		found,
+		missed,
+	};
 }

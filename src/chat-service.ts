@@ -12,13 +12,16 @@ import {
 	createOpenAiDebugInput,
 	getLatestJobContext,
 	listRecentChatMessages,
+	searchMemoryEntries,
 	type ChatMessageDocument,
+	type MemoryEntryDocument,
 	type SmediaMongoDatabase,
 } from "./db/mongo";
 import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logInfo, logWarn } from "./helpers/log";
 
 const DEFAULT_HISTORY_LIMIT = 12;
+const MAX_KEYWORD_MEMORY_MATCHES = 3;
 const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
 
 export interface GenerateChatReplyInput {
@@ -81,22 +84,34 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 		});
 	}
 
-	const recentMessages = await listRecentChatMessages(input.database, {
-		pluginId: input.pluginId,
-		sessionKey,
-		limit: DEFAULT_HISTORY_LIMIT,
-		kinds: ["chat"],
-	});
-	const latestJobContext = await getLatestJobContext(input.database, {
-		pluginId: input.pluginId,
-		sessionKey,
-	});
-	const contextMarkdown = await readOptionalContextMarkdown();
+	const topicKeywords = input.routeDecision?.entityHints?.topicKeywords ?? [];
+	const [recentMessages, latestJobContext, contextMarkdown, memoryRecall] = await Promise.all([
+		listRecentChatMessages(input.database, {
+			pluginId: input.pluginId,
+			sessionKey,
+			limit: DEFAULT_HISTORY_LIMIT,
+			kinds: ["chat"],
+		}),
+		getLatestJobContext(input.database, {
+			pluginId: input.pluginId,
+			sessionKey,
+		}),
+		readOptionalContextMarkdown(),
+		topicKeywords.length > 0
+			? searchMemoryEntries(input.database, {
+				pluginId: input.pluginId,
+				keywords: topicKeywords,
+				kinds: ["short-term-summary", "long-term-profile"],
+				limit: MAX_KEYWORD_MEMORY_MATCHES,
+			})
+			: Promise.resolve([] as MemoryEntryDocument[]),
+	]);
 	const promptInput = buildChatPrompt({
 		assistantName: input.assistantName,
 		channelId: input.channelId,
 		contextMarkdown,
 		memorySnapshot,
+		memoryRecall,
 		latestJobContext,
 		username: input.username,
 		recentMessages,
@@ -135,6 +150,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 			metadata: {
 				recentMessageCount: recentMessages.length,
 				unsummarizedMessageCount: memorySnapshot.unsummarizedMessages.length,
+				memoryRecallCount: memoryRecall.length,
 				hasContextMarkdown: contextMarkdown !== null,
 				hasShortTermSummary: memorySnapshot.shortTermSummary !== null,
 				hasLongTermProfile: memorySnapshot.longTermProfile !== null,
@@ -175,6 +191,7 @@ function buildChatPrompt(input: {
 	channelId: string;
 	contextMarkdown: string | null;
 	memorySnapshot: ChatMemorySnapshot;
+	memoryRecall: MemoryEntryDocument[];
 	latestJobContext: {
 		latestCommand: ChatMessageDocument | null;
 		latestJobUpdate: ChatMessageDocument | null;
@@ -346,6 +363,26 @@ function buildChatPrompt(input: {
 				{
 					type: "input_text",
 					text: `Activity since last memory consolidation (${input.memorySnapshot.unsummarizedMessages.length} messages not yet in the recap above):\n${formatted}`,
+				},
+			],
+		});
+	}
+
+	// Memory recall: keyword-matched entries from past conversations
+	if (input.memoryRecall.length > 0) {
+		const formatted = input.memoryRecall
+			.map((entry) => {
+				const sessionLabel = entry.sessionKey ?? "cross-session";
+				const age = formatRelativeAge(entry.updatedAt);
+				return `[${entry.kind}, session=${sessionLabel}, updated ${age}]\n${entry.content}`;
+			})
+			.join("\n\n---\n\n");
+		items.push({
+			role: "system",
+			content: [
+				{
+					type: "input_text",
+					text: `Recalled from past conversations (${input.memoryRecall.length} matching memory entries):\n${formatted}`,
 				},
 			],
 		});

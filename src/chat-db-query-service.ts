@@ -5,6 +5,7 @@ import {
 	listChatMessagesForMemoryWindow,
 	listRecentGenerationJobs,
 	searchChatMessages,
+	searchMemoryEntries,
 	type ChatMessageDocument,
 	type GenerationJobDocument,
 	type SmediaMongoDatabase,
@@ -14,6 +15,7 @@ import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types"
 const MAX_CHAT_MESSAGES = 12;
 const MAX_JOBS = 5;
 const MAX_KEYWORD_MATCH_MESSAGES = 8;
+const MAX_KEYWORD_MATCH_MEMORIES = 5;
 const MAX_SNIPPET_LENGTH = 1400;
 
 export async function retrieveDbRouteEvidence(input: {
@@ -31,7 +33,7 @@ export async function retrieveDbRouteEvidence(input: {
 
 	const snippets: ChatRouteEvidence["snippets"] = [];
 	const summaryParts: string[] = [];
-	const [memorySnapshot, recentMessages, latestJobContext, jobs, keywordMessages] = await Promise.all([
+	const [memorySnapshot, recentMessages, latestJobContext, jobs, keywordMessages, keywordMemories] = await Promise.all([
 		getChatMemorySnapshot({
 			database: input.database,
 			pluginId: input.pluginId,
@@ -50,6 +52,7 @@ export async function retrieveDbRouteEvidence(input: {
 		}),
 		loadRelevantJobs(input),
 		searchKeywordMessages(input),
+		searchKeywordMemories(input),
 	]);
 
 	if (jobs.length > 0) {
@@ -119,6 +122,21 @@ export async function retrieveDbRouteEvidence(input: {
 		});
 	}
 
+	if (keywordMemories.length > 0) {
+		summaryParts.push(`Loaded ${keywordMemories.length} keyword-matched memory entr${keywordMemories.length === 1 ? "y" : "ies"} from past conversations.`);
+		for (const entry of keywordMemories) {
+			snippets.push({
+				label: `Memory recall (${entry.kind}, session=${entry.sessionKey ?? "cross-session"})`,
+				content: truncate(entry.content),
+				sourceType: "db",
+				metadata: {
+					updatedAt: entry.updatedAt.toISOString(),
+					scope: entry.scope,
+				},
+			});
+		}
+	}
+
 	return {
 		route: "db-query",
 		subject: input.decision.subject,
@@ -184,6 +202,25 @@ async function searchKeywordMessages(input: {
 		keywords: input.decision.entityHints.topicKeywords,
 		kinds: ["chat", "command", "job-update", "status"],
 		limit: MAX_KEYWORD_MATCH_MESSAGES,
+	});
+}
+
+async function searchKeywordMemories(input: {
+	database: SmediaMongoDatabase;
+	pluginId: string;
+	userId: string;
+	decision: ChatRouteDecision;
+}): Promise<import("./db/mongo").MemoryEntryDocument[]> {
+	if (input.decision.entityHints.topicKeywords.length === 0) {
+		return [];
+	}
+
+	return searchMemoryEntries(input.database, {
+		pluginId: input.pluginId,
+		keywords: input.decision.entityHints.topicKeywords,
+		kinds: ["short-term-summary", "long-term-profile"],
+		userId: input.userId,
+		limit: MAX_KEYWORD_MATCH_MEMORIES,
 	});
 }
 
