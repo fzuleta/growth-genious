@@ -1,7 +1,7 @@
 import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import type { PluginCommand, PluginRouteRequest } from "../../../plugin-contract";
+import type { PluginCommand, PluginCommandContext, PluginCommandResult, PluginRouteRequest } from "../../../plugin-contract";
 import { createOpenAIClient } from "../../../openai/openai";
 
 const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
@@ -113,6 +113,16 @@ interface AnalyticsExecutionResult {
 	responsePayload: JsonObject;
 	summaryMarkdown: string;
 	legacyReportArtifact?: JsonObject;
+}
+
+export interface AnalyticsNaturalLanguageIntent {
+	args: string;
+	subject: string;
+	reason: string;
+	confidence?: "low" | "medium" | "high";
+	matchedBy?: "model" | "heuristic";
+	preset?: string;
+	dateArgs?: string | null;
 }
 
 interface AdminResourceConfig {
@@ -369,75 +379,181 @@ export const analyticsCommand: PluginCommand = {
 		return null;
 	},
 	handle: async (input) => {
-		const analyticsOutputDir = path.join(input.outputDir, "analytics");
-		await mkdir(analyticsOutputDir, { recursive: true });
-
-		const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
-		const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
-		const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
-		const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
-		const operation = parseAnalyticsOperation(input.args);
-
-		const accessToken = await getGoogleAccessToken({
-			serviceAccountEmail,
-			serviceAccountPrivateKey,
+		return executeAnalyticsInvocation(input, {
+			args: input.args,
+			requestSource: "/analytics",
 		});
-
-		const execution = await executeAnalyticsOperation({
-			propertyId,
-			accessToken,
-			operation,
-			exploreDir,
-		});
-
-		const requestedAt = new Date().toISOString();
-		const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
-		const responseArtifactPath = path.join(analyticsOutputDir, "latest-response.json");
-		const summaryArtifactPath = path.join(analyticsOutputDir, "latest-summary.md");
-		const legacyReportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
-
-		await writeFile(
-			requestArtifactPath,
-			JSON.stringify(
-				{
-					pluginId: input.plugin.id,
-					command: "/analytics",
-					requestedAt,
-					requestedBy: {
-						userId: input.message.author.id,
-						username: input.message.author.username,
-					},
-					args: input.args,
-					pluginRootDir: input.plugin.rootDir,
-					outputDir: input.plugin.outputDir,
-					propertyId,
-					operation: execution.requestPayload,
-				},
-				null,
-				2,
-			),
-			"utf8",
-		);
-		await writeFile(responseArtifactPath, JSON.stringify(execution.responsePayload, null, 2), "utf8");
-		await writeFile(summaryArtifactPath, execution.summaryMarkdown, "utf8");
-
-		const outputFiles = [
-			path.relative(process.cwd(), requestArtifactPath),
-			path.relative(process.cwd(), responseArtifactPath),
-			path.relative(process.cwd(), summaryArtifactPath),
-		];
-
-		if (execution.legacyReportArtifact) {
-			await writeFile(legacyReportArtifactPath, JSON.stringify(execution.legacyReportArtifact, null, 2), "utf8");
-			outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
-		}
-
-		return {
-			reply: execution.reply,
-			outputFiles,
-		};
 	},
 };
+
+export async function executeAnalyticsInvocation(
+	input: PluginCommandContext,
+	options: {
+		args: string;
+		requestSource: string;
+		originalPrompt?: string;
+		nlIntent?: AnalyticsNaturalLanguageIntent;
+	},
+): Promise<PluginCommandResult> {
+	const analyticsOutputDir = path.join(input.outputDir, "analytics");
+	await mkdir(analyticsOutputDir, { recursive: true });
+
+	const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
+	const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
+	const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
+	const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
+	const operation = parseAnalyticsOperation(options.args);
+
+	const accessToken = await getGoogleAccessToken({
+		serviceAccountEmail,
+		serviceAccountPrivateKey,
+	});
+
+	const execution = await executeAnalyticsOperation({
+		propertyId,
+		accessToken,
+		operation,
+		exploreDir,
+	});
+
+	const requestedAt = new Date().toISOString();
+	const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
+	const responseArtifactPath = path.join(analyticsOutputDir, "latest-response.json");
+	const summaryArtifactPath = path.join(analyticsOutputDir, "latest-summary.md");
+	const legacyReportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
+
+	await writeFile(
+		requestArtifactPath,
+		JSON.stringify(
+			{
+				pluginId: input.plugin.id,
+				command: options.requestSource,
+				requestedAt,
+				requestedBy: {
+					userId: input.message.author.id,
+					username: input.message.author.username,
+				},
+				args: options.args,
+				originalPrompt: options.originalPrompt ?? null,
+				nlInterpretation: options.nlIntent
+					? {
+						matchedBy: options.nlIntent.matchedBy ?? null,
+						confidence: options.nlIntent.confidence ?? null,
+						subject: options.nlIntent.subject,
+						preset: options.nlIntent.preset ?? null,
+						dateArgs: options.nlIntent.dateArgs ?? null,
+						args: options.nlIntent.args,
+						reason: options.nlIntent.reason,
+					}
+					: null,
+				pluginRootDir: input.plugin.rootDir,
+				outputDir: input.plugin.outputDir,
+				propertyId,
+				operation: execution.requestPayload,
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
+	await writeFile(responseArtifactPath, JSON.stringify(execution.responsePayload, null, 2), "utf8");
+	await writeFile(summaryArtifactPath, execution.summaryMarkdown, "utf8");
+
+	const outputFiles = [
+		path.relative(process.cwd(), requestArtifactPath),
+		path.relative(process.cwd(), responseArtifactPath),
+		path.relative(process.cwd(), summaryArtifactPath),
+	];
+
+	if (execution.legacyReportArtifact) {
+		await writeFile(legacyReportArtifactPath, JSON.stringify(execution.legacyReportArtifact, null, 2), "utf8");
+		outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
+	}
+
+	const reply = options.originalPrompt?.trim() && options.requestSource === "analytics-natural-language"
+		? await generateNaturalLanguageAnalyticsReply({
+			originalPrompt: options.originalPrompt,
+			analyticsArgs: options.args,
+			summaryMarkdown: execution.summaryMarkdown,
+			fallbackReply: execution.reply,
+		  })
+		: execution.reply;
+
+	return {
+		reply,
+		outputFiles,
+		diagnostics: options.nlIntent ? buildAnalyticsInterpretationDiagnostics(options.nlIntent) : undefined,
+	};
+}
+
+export function formatAnalyticsCommandResult(input: {
+	pluginId: string;
+	commandName: string;
+	outputDir: string;
+	result: PluginCommandResult | string;
+}): string {
+	if (typeof input.result === "string") {
+		return input.result;
+	}
+
+	const outputFiles = input.result.outputFiles?.filter((value) => value.trim().length > 0) ?? [];
+	const diagnostics = input.result.diagnostics?.filter((value) => value.trim().length > 0) ?? [];
+	if (outputFiles.length === 0 && diagnostics.length === 0) {
+		return input.result.reply;
+	}
+
+	return [
+		input.result.reply,
+		...diagnostics,
+		`command=/${input.commandName}`,
+		`plugin=${input.pluginId}`,
+		`outputDir=${path.relative(process.cwd(), input.outputDir) || input.outputDir}`,
+		`outputFiles=${outputFiles.join(",")}`,
+	].join("\n");
+}
+
+export function matchNaturalLanguageAnalyticsRequest(content: string): AnalyticsNaturalLanguageIntent | null {
+	const normalized = content.trim().toLowerCase();
+	if (!normalized) {
+		return null;
+	}
+
+	if (!looksLikeAnalyticsNaturalLanguageRequest(normalized)) {
+		return null;
+	}
+
+	const preset = inferAnalyticsPreset(normalized);
+	const dateRange = inferAnalyticsDateRangeArgs(normalized);
+	const args = dateRange ? `${preset} ${dateRange}` : preset;
+
+	return {
+		args,
+		subject: `analytics-${preset}`,
+		reason: "analytics-natural-language-match",
+		confidence: "medium",
+		matchedBy: "heuristic",
+		preset,
+		dateArgs: dateRange,
+	};
+}
+
+export async function matchNaturalLanguageAnalyticsRequestWithModel(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+	const normalized = content.trim();
+	if (!normalized) {
+		return null;
+	}
+
+	if (/^\/analytics\b/i.test(normalized)) {
+		return null;
+	}
+
+	const modelResult = await translateNaturalLanguageAnalyticsIntent(normalized);
+	if (modelResult) {
+		return modelResult;
+	}
+
+	return matchNaturalLanguageAnalyticsRequest(content);
+}
 
 function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 	const trimmed = args.trim();
@@ -1995,6 +2111,291 @@ function buildHelpText(): string {
 		"- '/analytics realtime {json}'",
 		"- '/analytics help'",
 	].join("\n");
+}
+
+function looksLikeAnalyticsNaturalLanguageRequest(content: string): boolean {
+	if (/^\/analytics\b/.test(content)) {
+		return false;
+	}
+
+	return (
+		/(how did we do|how are we doing|how did .* do|performance|analytics|ga4|traffic|sessions|active users|new users|engagement|bounce rate|top pages|top page|top events|events|traffic sources|sources|campaign|landing page|landing pages|device|devices|browser|geo|country|city|retention|realtime|live users|right now)/i.test(content) &&
+		/(yesterday|today|last\s+\d+\s+days?|last\s+week|past\s+week|last\s+month|past\s+month|right now|currently|this week|this month|daily|weekly|monthly|top|best|worst|how did|how are)/i.test(content)
+	);
+}
+
+function inferAnalyticsPreset(content: string): string {
+	if (/\b(realtime|right now|currently|live users?)\b/i.test(content)) {
+		return "realtime";
+	}
+	if (/\b(top events?|events?)\b/i.test(content)) {
+		return "events";
+	}
+	if (/\b(top pages?|pages?|content)\b/i.test(content)) {
+		return "pages";
+	}
+	if (/\b(source|sources|traffic|campaign|acquisition)\b/i.test(content)) {
+		return "sources";
+	}
+	if (/\b(device|devices|browser|mobile|desktop)\b/i.test(content)) {
+		return "devices";
+	}
+	if (/\b(country|city|geo|geography|region)\b/i.test(content)) {
+		return "geo";
+	}
+	if (/\b(landing|entry page|entry pages)\b/i.test(content)) {
+		return "landing";
+	}
+	if (/\b(engagement|bounce|session duration|engaged)\b/i.test(content)) {
+		return "engagement";
+	}
+
+	return "overview";
+}
+
+function inferAnalyticsDateRangeArgs(content: string): string | null {
+	if (/\b(realtime|right now|currently|live users?)\b/i.test(content)) {
+		return null;
+	}
+
+	const explicitDays = content.match(/\b(?:last|past)\s+(\d{1,2})\s+days?\b/i);
+	if (explicitDays) {
+		return `${clampLookback(Number(explicitDays[1]))}d`;
+	}
+
+	if (/\byesterday\b/i.test(content)) {
+		const yesterday = new Date();
+		yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+		const value = formatDate(yesterday);
+		return `${value} ${value}`;
+	}
+
+	if (/\btoday\b/i.test(content)) {
+		const today = formatDate(new Date());
+		return `${today} ${today}`;
+	}
+
+	if (/\b(last|past)\s+week\b/i.test(content) || /\bthis week\b/i.test(content)) {
+		return "7d";
+	}
+
+	if (/\b(last|past)\s+month\b/i.test(content) || /\bthis month\b/i.test(content)) {
+		return "30d";
+	}
+
+	if (/\bweekly\b/i.test(content)) {
+		return "7d";
+	}
+
+	if (/\bmonthly\b/i.test(content)) {
+		return "30d";
+	}
+
+	if (/\bdaily\b/i.test(content)) {
+		return "1d";
+	}
+
+	return "7d";
+}
+
+const NL_ANALYTICS_MODEL = process.env.OPENAI_NL_ANALYTICS_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
+const NL_ANALYTICS_REPLY_MODEL = process.env.OPENAI_NL_ANALYTICS_REPLY_MODEL?.trim() || process.env.OPENAI_ANALYTICS_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-5.4-mini";
+
+const NL_ANALYTICS_AVAILABLE_PRESETS = Object.keys(PRESET_REPORT_CONFIG);
+
+const NL_ANALYTICS_SYSTEM_PROMPT = [
+	"You classify whether a user message is asking about website/app analytics and, if so, translate it into a structured analytics command.",
+	"",
+	"Return strict JSON only with these keys:",
+	"  isAnalytics (boolean) — true if the message is asking about analytics, traffic, performance, users, events, pages, etc.",
+	"  preset (string|null) — the best matching preset from the available list, or null if not analytics.",
+	`  Available presets: ${NL_ANALYTICS_AVAILABLE_PRESETS.join(", ")}.`,
+	"  dateArgs (string|null) — the date range argument. Formats:",
+	"    - Relative: '<N>d' for last N days (e.g. '7d', '30d', '1d').",
+	"    - Exact day: 'YYYY-MM-DD YYYY-MM-DD' for a specific date range.",
+	"    - null to use the default (7 days).",
+	"  subject (string|null) — a short label for the analytics topic (e.g. 'analytics-overview', 'analytics-events').",
+	"  confidence (string) — 'high', 'medium', or 'low'.",
+	"",
+	"Mapping guidance:",
+	"  - General performance / 'how did we do' → overview",
+	"  - Events, top events, clicks, conversions → events",
+	"  - Pages, top pages, content → pages",
+	"  - Landing pages, entry pages → landing",
+	"  - Traffic, sources, campaigns, acquisition, referrals → sources",
+	"  - Devices, browser, mobile, desktop → devices",
+	"  - Country, city, geography, region → geo",
+	"  - Engagement, bounce rate, session duration → engagement",
+	"  - Realtime, live, right now → realtime (dateArgs must be null)",
+	"  - Journeys, paths, user flow → journeys",
+	"  - Retention, cohort → cohort",
+	"",
+	"Date guidance:",
+	`  - Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+	"  - 'yesterday' → compute the exact date and return 'YYYY-MM-DD YYYY-MM-DD' with both dates the same.",
+	"  - 'today' → compute today's date and return 'YYYY-MM-DD YYYY-MM-DD' with both dates the same.",
+	"  - 'last week' or 'past week' → '7d'.",
+	"  - 'last month' or 'past month' → '30d'.",
+	"  - 'last N days' → '<N>d'.",
+	"  - If no time reference, return null (defaults to 7d).",
+	"",
+	"Examples:",
+	"  - 'how did we do yesterday' -> {\"isAnalytics\": true, \"preset\": \"overview\", \"dateArgs\": \"YYYY-MM-DD YYYY-MM-DD\", \"subject\": \"analytics-overview\", \"confidence\": \"high\"}",
+	"  - 'what were our top pages last 30 days' -> {\"isAnalytics\": true, \"preset\": \"pages\", \"dateArgs\": \"30d\", \"subject\": \"analytics-pages\", \"confidence\": \"high\"}",
+	"  - 'which sources are driving traffic this month' -> {\"isAnalytics\": true, \"preset\": \"sources\", \"dateArgs\": \"30d\", \"subject\": \"analytics-sources\", \"confidence\": \"high\"}",
+	"  - 'show live users right now' -> {\"isAnalytics\": true, \"preset\": \"realtime\", \"dateArgs\": null, \"subject\": \"analytics-realtime\", \"confidence\": \"high\"}",
+	"  - 'what countries are users coming from' -> {\"isAnalytics\": true, \"preset\": \"geo\", \"dateArgs\": null, \"subject\": \"analytics-geo\", \"confidence\": \"medium\"}",
+	"",
+	"If the message is NOT about analytics, return: {\"isAnalytics\": false, \"preset\": null, \"dateArgs\": null, \"subject\": null, \"confidence\": \"high\"}",
+].join("\n");
+
+interface NLAnalyticsModelResponse {
+	isAnalytics: boolean;
+	preset: string | null;
+	dateArgs: string | null;
+	subject: string | null;
+	confidence: "low" | "medium" | "high";
+}
+
+async function translateNaturalLanguageAnalyticsIntent(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+	try {
+		const client = createOpenAIClient();
+		const response = await client.responses.create({
+			model: NL_ANALYTICS_MODEL,
+			input: [
+				{
+					role: "system",
+					content: [{ type: "input_text", text: NL_ANALYTICS_SYSTEM_PROMPT }],
+				},
+				{
+					role: "user",
+					content: [{ type: "input_text", text: content }],
+				},
+			],
+		});
+
+		const parsed = parseNLAnalyticsModelResponse(response.output_text);
+		if (!parsed || !parsed.isAnalytics || !parsed.preset) {
+			return null;
+		}
+		if (parsed.confidence === "low") {
+			return null;
+		}
+		if (!NL_ANALYTICS_AVAILABLE_PRESETS.includes(parsed.preset)) {
+			return null;
+		}
+
+		const args = parsed.dateArgs ? `${parsed.preset} ${parsed.dateArgs}` : parsed.preset;
+
+		return {
+			args,
+			subject: parsed.subject ?? `analytics-${parsed.preset}`,
+			reason: `analytics-nl-model-${parsed.confidence}`,
+			confidence: parsed.confidence,
+			matchedBy: "model",
+			preset: parsed.preset,
+			dateArgs: parsed.dateArgs,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function buildAnalyticsInterpretationDiagnostics(intent: AnalyticsNaturalLanguageIntent): string[] {
+	return [
+		`nlMatchedBy=${intent.matchedBy ?? "unknown"}`,
+		`nlConfidence=${intent.confidence ?? "unknown"}`,
+		`nlSubject=${intent.subject}`,
+		`nlPreset=${intent.preset ?? "unknown"}`,
+		`nlDateArgs=${intent.dateArgs ?? "default"}`,
+		`nlArgs=${intent.args}`,
+	];
+}
+
+async function generateNaturalLanguageAnalyticsReply(input: {
+	originalPrompt: string;
+	analyticsArgs: string;
+	summaryMarkdown: string;
+	fallbackReply: string;
+}): Promise<string> {
+	try {
+		const client = createOpenAIClient();
+		const response = await client.responses.create({
+			model: NL_ANALYTICS_REPLY_MODEL,
+			input: [
+				{
+					role: "system",
+					content: [
+						{
+							type: "input_text",
+							text: [
+								"You answer a user's analytics question using the provided GA4 summary.",
+								"Answer the user's actual question directly, not the command that was run.",
+								"Use concrete numbers from the summary when available.",
+								"If the data only partially answers the question, say that briefly and explain what the current result does show.",
+								"Keep the answer concise, specific, and useful for Discord.",
+								"Do not mention internal prompts, models, routing, or implementation details.",
+								"Do not invent metrics that are not present in the summary.",
+								"Stay under 1200 characters.",
+							].join(" "),
+						},
+					],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "input_text",
+							text: JSON.stringify({
+								userQuestion: input.originalPrompt,
+								resolvedAnalyticsArgs: input.analyticsArgs,
+								analyticsSummary: input.summaryMarkdown,
+							}),
+						},
+					],
+				},
+			],
+		});
+
+		const text = response.output_text.trim();
+		return text || input.fallbackReply;
+	} catch {
+		return input.fallbackReply;
+	}
+}
+
+function parseNLAnalyticsModelResponse(text: string): NLAnalyticsModelResponse | null {
+	const normalized = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+	if (!normalized) {
+		return null;
+	}
+
+	try {
+		const parsed = JSON.parse(normalized) as Record<string, unknown>;
+		if (typeof parsed.isAnalytics !== "boolean") {
+			return null;
+		}
+		if (parsed.preset !== null && typeof parsed.preset !== "string") {
+			return null;
+		}
+		if (parsed.dateArgs !== null && typeof parsed.dateArgs !== "string") {
+			return null;
+		}
+		const confidence = parsed.confidence;
+		if (confidence !== "low" && confidence !== "medium" && confidence !== "high") {
+			return null;
+		}
+
+		return {
+			isAnalytics: parsed.isAnalytics,
+			preset: typeof parsed.preset === "string" ? parsed.preset.trim().toLowerCase() : null,
+			dateArgs: typeof parsed.dateArgs === "string" ? parsed.dateArgs.trim() : null,
+			subject: typeof parsed.subject === "string" ? parsed.subject.trim() : null,
+			confidence,
+		};
+	} catch {
+		return null;
+	}
 }
 
 function cloneJsonObject(value: JsonObject): JsonObject {
