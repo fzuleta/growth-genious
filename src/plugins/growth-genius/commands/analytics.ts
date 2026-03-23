@@ -505,6 +505,24 @@ export function matchNaturalLanguageAnalyticsRequest(content: string): Analytics
 	};
 }
 
+export async function matchNaturalLanguageAnalyticsRequestWithModel(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+	const normalized = content.trim();
+	if (!normalized) {
+		return null;
+	}
+
+	if (/^\/analytics\b/i.test(normalized)) {
+		return null;
+	}
+
+	const modelResult = await translateNaturalLanguageAnalyticsIntent(normalized);
+	if (modelResult) {
+		return modelResult;
+	}
+
+	return matchNaturalLanguageAnalyticsRequest(content);
+}
+
 function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 	const trimmed = args.trim();
 	if (!trimmed) {
@@ -2146,6 +2164,131 @@ function inferAnalyticsDateRangeArgs(content: string): string | null {
 	}
 
 	return "7d";
+}
+
+const NL_ANALYTICS_MODEL = process.env.OPENAI_NL_ANALYTICS_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-4.1-mini";
+
+const NL_ANALYTICS_AVAILABLE_PRESETS = Object.keys(PRESET_REPORT_CONFIG);
+
+const NL_ANALYTICS_SYSTEM_PROMPT = [
+	"You classify whether a user message is asking about website/app analytics and, if so, translate it into a structured analytics command.",
+	"",
+	"Return strict JSON only with these keys:",
+	"  isAnalytics (boolean) — true if the message is asking about analytics, traffic, performance, users, events, pages, etc.",
+	"  preset (string|null) — the best matching preset from the available list, or null if not analytics.",
+	`  Available presets: ${NL_ANALYTICS_AVAILABLE_PRESETS.join(", ")}.`,
+	"  dateArgs (string|null) — the date range argument. Formats:",
+	"    - Relative: '<N>d' for last N days (e.g. '7d', '30d', '1d').",
+	"    - Exact day: 'YYYY-MM-DD YYYY-MM-DD' for a specific date range.",
+	"    - null to use the default (7 days).",
+	"  subject (string|null) — a short label for the analytics topic (e.g. 'analytics-overview', 'analytics-events').",
+	"  confidence (string) — 'high', 'medium', or 'low'.",
+	"",
+	"Mapping guidance:",
+	"  - General performance / 'how did we do' → overview",
+	"  - Events, top events, clicks, conversions → events",
+	"  - Pages, top pages, content → pages",
+	"  - Landing pages, entry pages → landing",
+	"  - Traffic, sources, campaigns, acquisition, referrals → sources",
+	"  - Devices, browser, mobile, desktop → devices",
+	"  - Country, city, geography, region → geo",
+	"  - Engagement, bounce rate, session duration → engagement",
+	"  - Realtime, live, right now → realtime (dateArgs must be null)",
+	"  - Journeys, paths, user flow → journeys",
+	"  - Retention, cohort → cohort",
+	"",
+	"Date guidance:",
+	`  - Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+	"  - 'yesterday' → compute the exact date and return 'YYYY-MM-DD YYYY-MM-DD' with both dates the same.",
+	"  - 'today' → compute today's date and return 'YYYY-MM-DD YYYY-MM-DD' with both dates the same.",
+	"  - 'last week' or 'past week' → '7d'.",
+	"  - 'last month' or 'past month' → '30d'.",
+	"  - 'last N days' → '<N>d'.",
+	"  - If no time reference, return null (defaults to 7d).",
+	"",
+	"If the message is NOT about analytics, return: {\"isAnalytics\": false, \"preset\": null, \"dateArgs\": null, \"subject\": null, \"confidence\": \"high\"}",
+].join("\n");
+
+interface NLAnalyticsModelResponse {
+	isAnalytics: boolean;
+	preset: string | null;
+	dateArgs: string | null;
+	subject: string | null;
+	confidence: "low" | "medium" | "high";
+}
+
+async function translateNaturalLanguageAnalyticsIntent(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+	try {
+		const client = createOpenAIClient();
+		const response = await client.responses.create({
+			model: NL_ANALYTICS_MODEL,
+			input: [
+				{
+					role: "system",
+					content: [{ type: "input_text", text: NL_ANALYTICS_SYSTEM_PROMPT }],
+				},
+				{
+					role: "user",
+					content: [{ type: "input_text", text: content }],
+				},
+			],
+		});
+
+		const parsed = parseNLAnalyticsModelResponse(response.output_text);
+		if (!parsed || !parsed.isAnalytics || !parsed.preset) {
+			return null;
+		}
+		if (parsed.confidence === "low") {
+			return null;
+		}
+		if (!NL_ANALYTICS_AVAILABLE_PRESETS.includes(parsed.preset)) {
+			return null;
+		}
+
+		const args = parsed.dateArgs ? `${parsed.preset} ${parsed.dateArgs}` : parsed.preset;
+
+		return {
+			args,
+			subject: parsed.subject ?? `analytics-${parsed.preset}`,
+			reason: `analytics-nl-model-${parsed.confidence}`,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function parseNLAnalyticsModelResponse(text: string): NLAnalyticsModelResponse | null {
+	const normalized = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+	if (!normalized) {
+		return null;
+	}
+
+	try {
+		const parsed = JSON.parse(normalized) as Record<string, unknown>;
+		if (typeof parsed.isAnalytics !== "boolean") {
+			return null;
+		}
+		if (parsed.preset !== null && typeof parsed.preset !== "string") {
+			return null;
+		}
+		if (parsed.dateArgs !== null && typeof parsed.dateArgs !== "string") {
+			return null;
+		}
+		const confidence = parsed.confidence;
+		if (confidence !== "low" && confidence !== "medium" && confidence !== "high") {
+			return null;
+		}
+
+		return {
+			isAnalytics: parsed.isAnalytics,
+			preset: typeof parsed.preset === "string" ? parsed.preset.trim().toLowerCase() : null,
+			dateArgs: typeof parsed.dateArgs === "string" ? parsed.dateArgs.trim() : null,
+			subject: typeof parsed.subject === "string" ? parsed.subject.trim() : null,
+			confidence,
+		};
+	} catch {
+		return null;
+	}
 }
 
 function cloneJsonObject(value: JsonObject): JsonObject {

@@ -67,6 +67,10 @@ export async function ensureSelfModifyIndexes(database: SmediaMongoDatabase): Pr
 			name: "plugin_channel_state_updatedAt",
 		},
 		{
+			key: { pluginId: 1, state: 1, updatedAt: 1 },
+			name: "plugin_state_updatedAt",
+		},
+		{
 			key: { createdAt: 1 },
 			name: "createdAt_ttl_7d",
 			expireAfterSeconds: 7 * 24 * 60 * 60,

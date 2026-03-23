@@ -396,23 +396,13 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			routeDecision,
 			routeEvidence,
 		});
-		const recentChatMessages = await listRecentChatMessages(database, {
-			pluginId: currentPlugin.id,
-			sessionKey,
-			limit: 8,
-			kinds: ["chat"],
-		});
+		const recentAssistantReplies = await listRecentAssistantReplies(database, sessionKey);
 		const replyWithNextStep = await appendInlineNextStep({
 			reply,
 			userContent: combinedContent,
 			routeDecision,
 			routeEvidence,
-			recentAssistantReplies: recentChatMessages
-				.filter((entry) => entry.authorRole === "assistant")
-				.map((entry) => ({
-					content: entry.content,
-					createdAt: entry.createdAt,
-				})),
+			recentAssistantReplies,
 		});
 		await replyToMessage(
 			database,

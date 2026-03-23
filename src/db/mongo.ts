@@ -769,7 +769,7 @@ export async function listRecentGenerationJobs(
 
 	return database.collections.generationJobs
 		.find(filter)
-		.sort({ createdAt: -1 })
+		.sort({ updatedAt: -1, createdAt: -1 })
 		.limit(input.limit)
 		.toArray();
 }
@@ -970,7 +970,12 @@ export async function queueProactiveOutboxItem(
 			},
 			created: true,
 		};
-	} catch {
+	} catch (error: unknown) {
+		const isDuplicateKey = error instanceof Error && "code" in error && (error as { code: unknown }).code === 11000;
+		if (!isDuplicateKey) {
+			throw error;
+		}
+
 		const persisted = await database.collections.proactiveOutbox.findOne({
 			pluginId: input.pluginId,
 			dedupeKey,
@@ -1025,7 +1030,7 @@ export async function markProactiveOutboxItemSent(
 	}
 
 	await database.collections.proactiveOutbox.updateOne(
-		{ _id: input.id },
+		{ _id: input.id, status: "pending" },
 		{ $set: setDocument },
 	);
 }
@@ -1039,7 +1044,7 @@ export async function cancelProactiveOutboxItem(
 ): Promise<void> {
 	const cancelledAt = new Date();
 	await database.collections.proactiveOutbox.updateOne(
-		{ _id: input.id },
+		{ _id: input.id, status: "pending" },
 		{
 			$set: {
 				status: "cancelled",
