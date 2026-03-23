@@ -14,6 +14,7 @@ import {
 	getDiffStat,
 	hasUncommittedChanges,
 } from "./helpers/git";
+import { resolveOpenAiTaskConfig } from "./ai/text-router";
 import { logInfo, logWarn, logError } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
 import { readOptionalContextMarkdown } from "./context-service";
@@ -42,10 +43,6 @@ interface ShellCommandResult {
 	success: boolean;
 	output: string;
 	exitCode: number | null;
-}
-
-function getAgentModel(): string {
-	return process.env.OPENAI_AGENT_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-4o";
 }
 
 // ── Public API ──
@@ -206,7 +203,8 @@ async function runPlanningLoop(
 	database: SmediaMongoDatabase,
 	session: SelfModifySessionDocument,
 ): Promise<string> {
-	const model = getAgentModel();
+	const plugin = getBuiltinPluginById(session.pluginId);
+	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const conversationItems: ResponseInputItem[] = buildPlanningSystemPrompt(session, contextMarkdown);
 
@@ -281,7 +279,8 @@ async function runExecutionLoop(
 	database: SmediaMongoDatabase,
 	session: SelfModifySessionDocument,
 ): Promise<string> {
-	const model = getAgentModel();
+	const plugin = getBuiltinPluginById(session.pluginId);
+	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const conversationItems: ResponseInputItem[] = buildExecutionSystemPrompt(session);
 
 	const client = createOpenAIClient();

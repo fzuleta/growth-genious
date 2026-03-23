@@ -50,6 +50,11 @@ export interface ResolvedAiTextTaskConfig {
 	model: string;
 }
 
+export interface ResolvedOpenAiTaskConfig {
+	provider: "openai";
+	model: string;
+}
+
 export function resolveAiProvider(env: NodeJS.ProcessEnv = process.env): AiProvider {
 	const provider = env.AI_PROVIDER?.trim().toLowerCase();
 	if (provider === "openrouter") {
@@ -75,6 +80,23 @@ export function resolveAiTextTaskConfig(
 	return {
 		provider: pluginConfig.provider ?? resolveAiProvider(env),
 		model: options.modelOverride ?? pluginConfig.model ?? CORE_TEXT_MODEL_RESOLVERS[task](env),
+	};
+}
+
+export function resolveOpenAiTaskConfig(
+	task: AiTextTask,
+	options: ResolveAiTextTaskOptions = {},
+): ResolvedOpenAiTaskConfig {
+	const config = resolveAiTextTaskConfig(task, options);
+	if (config.provider !== "openai") {
+		throw new Error(
+			`Task '${task}' currently requires the OpenAI Responses provider because its tool loop is not provider-agnostic yet.`,
+		);
+	}
+
+	return {
+		provider: "openai",
+		model: config.model,
 	};
 }
 

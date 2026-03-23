@@ -1,4 +1,5 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
+import { resolveOpenAiTaskConfig } from "./ai/text-router";
 import { readOptionalContextMarkdown } from "./context-service";
 import { logInfo } from "./helpers/log";
 import { createOpenAIClient } from "./openai/openai";
@@ -7,17 +8,14 @@ import { ANALYSIS_TOOLS, executeToolCall } from "./self-modify-tools";
 
 const MAX_ANALYSIS_ITERATIONS = 20;
 
-function getAnalysisModel(): string {
-	return process.env.OPENAI_AGENT_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-4o";
-}
-
 export async function runCodeAnalysis(input: {
 	request: string;
 	username: string;
 	channelId: string;
 	pluginId?: string;
 }): Promise<string> {
-	const model = getAnalysisModel();
+	const plugin = input.pluginId ? getBuiltinPluginById(input.pluginId) : null;
+	const { model } = resolveOpenAiTaskConfig("agent", { plugin });
 	const contextMarkdown = await readOptionalContextMarkdown();
 	const conversationItems: ResponseInputItem[] = buildAnalysisPrompt(input, contextMarkdown);
 	const client = createOpenAIClient();
