@@ -4,7 +4,7 @@ import {
 	getLatestMemoryEntry,
 	getMemoryCheckpoint,
 	listChatMessagesForMemoryWindow,
-	listMemoryEntries,
+	listRecentShortTermSummariesForUser,
 	markSessionConsolidated,
 	upsertMemoryCheckpoint,
 	upsertMemoryEntry,
@@ -13,18 +13,21 @@ import {
 	type SmediaMongoDatabase,
 } from "./db/mongo";
 import { generateText, resolveAiTextModel } from "./ai/text-router";
+import type { PluginContract } from "./plugin-contract";
 import { logInfo, logWarn } from "./helpers/log";
 
 const SHORT_TERM_SOURCE_LIMIT = 50;
 const LONG_TERM_SOURCE_LIMIT = 50;
 const MAX_SESSIONS_PER_CYCLE = 20;
-const SHORT_TERM_PROMPT_LIMIT = 1;
 const LONG_TERM_WORD_LIMIT = 3000;
 const SHORT_TERM_WORD_LIMIT = 1000;
+const UNSUMMARIZED_MESSAGE_LIMIT = 20;
+const CROSS_SESSION_SUMMARY_LIMIT = 5;
 
 export interface ChatMemorySnapshot {
 	shortTermSummary: MemoryEntryDocument | null;
 	longTermProfile: MemoryEntryDocument | null;
+	unsummarizedMessages: ChatMessageDocument[];
 }
 
 export async function getChatMemorySnapshot(input: {
@@ -33,13 +36,12 @@ export async function getChatMemorySnapshot(input: {
 	sessionKey: string;
 	userId: string;
 }): Promise<ChatMemorySnapshot> {
-	const [shortTermSummaries, longTermProfile] = await Promise.all([
-		listMemoryEntries(input.database, {
+	const [shortTermSummary, longTermProfile] = await Promise.all([
+		getLatestMemoryEntry(input.database, {
 			pluginId: input.pluginId,
 			kinds: ["short-term-summary"],
 			scope: "session",
 			sessionKey: input.sessionKey,
-			limit: SHORT_TERM_PROMPT_LIMIT,
 		}),
 		getLatestMemoryEntry(input.database, {
 			pluginId: input.pluginId,
@@ -49,9 +51,20 @@ export async function getChatMemorySnapshot(input: {
 		}),
 	]);
 
+	const unsummarizedMessages = shortTermSummary
+		? await listChatMessagesForMemoryWindow(input.database, {
+			pluginId: input.pluginId,
+			sessionKey: input.sessionKey,
+			kinds: ["chat", "command", "job-update"],
+			afterCreatedAt: shortTermSummary.updatedAt,
+			limit: UNSUMMARIZED_MESSAGE_LIMIT,
+		})
+		: [];
+
 	return {
-		shortTermSummary: shortTermSummaries[0] ?? null,
+		shortTermSummary,
 		longTermProfile,
+		unsummarizedMessages,
 	};
 }
 
@@ -105,6 +118,7 @@ function formatRelativeAge(date: Date): string {
 export async function runChatMemoryConsolidationCycle(input: {
 	database: SmediaMongoDatabase;
 	pluginId: string;
+	plugin?: PluginContract | null;
 }): Promise<{
 	processedSessionCount: number;
 	updatedShortTermCount: number;
@@ -137,6 +151,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 			const result = await consolidateSessionMemory({
 				database: input.database,
 				pluginId: input.pluginId,
+				plugin: input.plugin,
 				contextMarkdown,
 				sessionKey: session.sessionKey,
 				guildId: session.guildId,
@@ -190,6 +205,7 @@ export async function runChatMemoryConsolidationCycle(input: {
 async function consolidateSessionMemory(input: {
 	database: SmediaMongoDatabase;
 	pluginId: string;
+	plugin?: PluginContract | null;
 	contextMarkdown: string | null;
 	sessionKey: string;
 	guildId: string;
@@ -252,6 +268,7 @@ async function consolidateSessionMemory(input: {
 		sessionKey: input.sessionKey,
 	});
 	const summaryContent = await summarizeShortTermMemory({
+		plugin: input.plugin,
 		contextMarkdown: input.contextMarkdown,
 		existingSummary: latestShortTerm?.content ?? null,
 		messages: sourceMessages,
@@ -308,10 +325,10 @@ async function consolidateSessionMemory(input: {
 		const updated = await maybeRefreshLongTermProfileForUser({
 			database: input.database,
 			pluginId: input.pluginId,
+			plugin: input.plugin,
 			contextMarkdown: input.contextMarkdown,
 			userId,
 			username,
-			supportingShortTermSummary: summaryContent,
 			guildId: input.guildId,
 			channelId: input.channelId,
 		});
@@ -331,10 +348,10 @@ async function consolidateSessionMemory(input: {
 async function maybeRefreshLongTermProfileForUser(input: {
 	database: SmediaMongoDatabase;
 	pluginId: string;
+	plugin?: PluginContract | null;
 	contextMarkdown: string | null;
 	userId: string;
 	username: string;
-	supportingShortTermSummary: string;
 	guildId: string;
 	channelId: string;
 }): Promise<boolean> {
@@ -381,18 +398,33 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		return false;
 	}
 
-	const latestProfile = await getLatestMemoryEntry(input.database, {
-		pluginId: input.pluginId,
-		kinds: ["long-term-profile"],
-		scope: "user",
-		userId: input.userId,
-	});
+	const [latestProfile, recentSessionSummaries] = await Promise.all([
+		getLatestMemoryEntry(input.database, {
+			pluginId: input.pluginId,
+			kinds: ["long-term-profile"],
+			scope: "user",
+			userId: input.userId,
+		}),
+		listRecentShortTermSummariesForUser(input.database, {
+			pluginId: input.pluginId,
+			userId: input.userId,
+			limit: CROSS_SESSION_SUMMARY_LIMIT,
+		}),
+	]);
+
+	const crossSessionContext = recentSessionSummaries.length > 0
+		? recentSessionSummaries
+			.map((entry) => `[session=${entry.sessionKey ?? "unknown"} updated=${entry.updatedAt.toISOString()}]\n${entry.content}`)
+			.join("\n\n---\n\n")
+		: null;
+
 	const profileContent = await summarizeLongTermProfile({
+		plugin: input.plugin,
 		contextMarkdown: input.contextMarkdown,
 		existingProfile: latestProfile?.content ?? null,
 		messages: eligibleSourceMessages,
 		username: input.username,
-		supportingShortTermSummary: input.supportingShortTermSummary,
+		crossSessionContext,
 	});
 
 	const previousWords = latestProfile ? latestProfile.content.split(/\s+/).length : 0;
@@ -402,6 +434,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 		previousWords,
 		newWords,
 		sourceMessageCount: sourceMessages.length,
+		crossSessionSummaryCount: recentSessionSummaries.length,
 		wordLimit: LONG_TERM_WORD_LIMIT,
 	});
 	const createdAt = eligibleSourceMessages[eligibleSourceMessages.length - 1]?.createdAt ?? new Date();
@@ -460,6 +493,7 @@ function collectParticipants(messages: ChatMessageDocument[]): Map<string, strin
 }
 
 async function summarizeShortTermMemory(input: {
+	plugin?: PluginContract | null;
 	contextMarkdown: string | null;
 	existingSummary: string | null;
 	messages: ChatMessageDocument[];
@@ -491,16 +525,17 @@ async function summarizeShortTermMemory(input: {
 		`New conversation batch:\n${formatMessagesForPrompt(input.messages)}`,
 	].join("\n\n");
 
-	const text = await requestText(prompt);
+	const text = await requestText(prompt, input.plugin);
 	return trimToWordLimit(text, SHORT_TERM_WORD_LIMIT);
 }
 
 async function summarizeLongTermProfile(input: {
+	plugin?: PluginContract | null;
 	contextMarkdown: string | null;
 	existingProfile: string | null;
 	messages: ChatMessageDocument[];
 	username: string;
-	supportingShortTermSummary: string;
+	crossSessionContext: string | null;
 }): Promise<string> {
 	const prompt = [
 		"You maintain a durable long-term profile for future conversations with the user.",
@@ -523,20 +558,22 @@ async function summarizeLongTermProfile(input: {
 		"- Prefer compressed phrases over full sentences when meaning stays clear.",
 		"- Remove low-value context, examples, restatements, and narrative filler.",
 		"- Keep only information worth paying tokens for repeatedly across future chats.",
+		"- Use the cross-session recaps to detect patterns that span multiple conversations or channels.",
 		input.contextMarkdown ? `Operating context:\n${input.contextMarkdown}` : "Operating context:\nNone",
 		input.existingProfile ? `Existing long-term profile:\n${input.existingProfile}` : "Existing long-term profile:\nNone",
-		`Latest session short-term memory:\n${input.supportingShortTermSummary}`,
+		input.crossSessionContext ? `Recent session recaps (across all channels):\n${input.crossSessionContext}` : "Recent session recaps:\nNone",
 		`New conversation batch (user + assistant):\n${formatMessagesForPrompt(input.messages)}`,
 	].join("\n\n");
 
-	const text = await requestText(prompt);
+	const text = await requestText(prompt, input.plugin);
 	return trimToWordLimit(text, LONG_TERM_WORD_LIMIT);
 }
 
-async function requestText(prompt: string): Promise<string> {
+async function requestText(prompt: string, plugin?: PluginContract | null): Promise<string> {
 	const response = await generateText({
 		task: "memory",
-		model: getChatMemoryModel(),
+		model: getChatMemoryModel(plugin),
+		plugin: plugin ?? undefined,
 		input: [
 			{
 				role: "system",
@@ -616,6 +653,6 @@ function trimToWordLimit(text: string, limit: number): string {
 	return `${words.slice(0, limit).join(" ")}...`;
 }
 
-function getChatMemoryModel(): string {
-	return resolveAiTextModel("memory");
+function getChatMemoryModel(plugin?: PluginContract | null): string {
+	return resolveAiTextModel("memory", { plugin });
 }

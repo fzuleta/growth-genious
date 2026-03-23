@@ -18,7 +18,7 @@ import {
 import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logInfo, logWarn } from "./helpers/log";
 
-const DEFAULT_HISTORY_LIMIT = 4;
+const DEFAULT_HISTORY_LIMIT = 12;
 const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
 
 export interface GenerateChatReplyInput {
@@ -63,6 +63,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	let memorySnapshot: ChatMemorySnapshot = {
 		shortTermSummary: null,
 		longTermProfile: null,
+		unsummarizedMessages: [],
 	};
 	try {
 		memorySnapshot = await getChatMemorySnapshot({
@@ -133,6 +134,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 			promptInput,
 			metadata: {
 				recentMessageCount: recentMessages.length,
+				unsummarizedMessageCount: memorySnapshot.unsummarizedMessages.length,
 				hasContextMarkdown: contextMarkdown !== null,
 				hasShortTermSummary: memorySnapshot.shortTermSummary !== null,
 				hasLongTermProfile: memorySnapshot.longTermProfile !== null,
@@ -213,17 +215,17 @@ function buildChatPrompt(input: {
 		},
 	];
 
-	if (input.routeDecision && input.routeDecision.route !== "conversation") {
+	// Long-term profile early: stable background the model should know but not over-weight
+	if (input.memorySnapshot.longTermProfile) {
 		items.push({
 			role: "system",
 			content: [
 				{
 					type: "input_text",
 					text: [
-						`Route mode: ${input.routeDecision.route}.`,
-						"Answer factual parts only from the provided evidence.",
-						"If the evidence is incomplete, say what is missing instead of guessing.",
-					].join(" "),
+						"Use this durable user profile when relevant, but let the latest user message override it.",
+						input.memorySnapshot.longTermProfile.content,
+					].join("\n\n"),
 				},
 			],
 		});
@@ -239,6 +241,22 @@ function buildChatPrompt(input: {
 						"Use this context.md guidance as the primary operating context for this chat.",
 						input.contextMarkdown,
 					].join("\n\n"),
+				},
+			],
+		});
+	}
+
+	if (input.routeDecision && input.routeDecision.route !== "conversation") {
+		items.push({
+			role: "system",
+			content: [
+				{
+					type: "input_text",
+					text: [
+						`Route mode: ${input.routeDecision.route}.`,
+						"Answer factual parts only from the provided evidence.",
+						"If the evidence is incomplete, say what is missing instead of guessing.",
+					].join(" "),
 				},
 			],
 		});
@@ -297,21 +315,7 @@ function buildChatPrompt(input: {
 		});
 	}
 
-	if (input.memorySnapshot.longTermProfile) {
-		items.push({
-			role: "system",
-			content: [
-				{
-					type: "input_text",
-					text: [
-						"Use this durable user profile when relevant, but let the latest user message override it.",
-						input.memorySnapshot.longTermProfile.content,
-					].join("\n\n"),
-				},
-			],
-		});
-	}
-
+	// Short-term summary: recent high-signal context close to the conversation
 	if (input.memorySnapshot.shortTermSummary) {
 		const summaryAge = formatRelativeAge(input.memorySnapshot.shortTermSummary.updatedAt);
 		items.push({
@@ -323,6 +327,25 @@ function buildChatPrompt(input: {
 						`Latest short-term conversation recap (updated ${summaryAge}):`,
 						input.memorySnapshot.shortTermSummary.content,
 					].join("\n"),
+				},
+			],
+		});
+	}
+
+	// Unsummarized messages: bridge the gap between last consolidation and now
+	if (input.memorySnapshot.unsummarizedMessages.length > 0) {
+		const formatted = input.memorySnapshot.unsummarizedMessages
+			.map((msg) => {
+				const label = msg.authorRole === "assistant" ? "assistant" : `user:${(msg.metadata?.username as string) || "unknown"}`;
+				return `[${msg.createdAt.toISOString()}] ${label}: ${msg.content}`;
+			})
+			.join("\n");
+		items.push({
+			role: "system",
+			content: [
+				{
+					type: "input_text",
+					text: `Activity since last memory consolidation (${input.memorySnapshot.unsummarizedMessages.length} messages not yet in the recap above):\n${formatted}`,
 				},
 			],
 		});
@@ -524,6 +547,10 @@ function estimatePromptTokenBudget(
 		estimatedTotalTokens: Math.ceil(totalChars / TOKEN_BUDGET_CHARS_PER_TOKEN),
 		shortTermTokens: estimateTokens(memorySnapshot.shortTermSummary?.content),
 		longTermTokens: estimateTokens(memorySnapshot.longTermProfile?.content),
+		unsummarizedMessageCount: memorySnapshot.unsummarizedMessages.length,
+		unsummarizedTokens: estimateTokens(
+			memorySnapshot.unsummarizedMessages.map((m) => m.content).join("\n"),
+		),
 		contextTokens: estimateTokens(contextMarkdown),
 		routeEvidenceTokens: estimateTokens(
 			routeEvidence

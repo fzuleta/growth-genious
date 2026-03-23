@@ -842,6 +842,7 @@ async function executeMemoryConsolidationCycle(): Promise<Awaited<
 			return await runChatMemoryConsolidationCycle({
 				database: mongoDatabase as SmediaMongoDatabase,
 				pluginId: currentPlugin.id,
+				plugin: currentPlugin,
 			});
 		} catch (error: unknown) {
 			logWarn("Scheduled chat memory consolidation failed", {

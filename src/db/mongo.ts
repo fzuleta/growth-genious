@@ -29,7 +29,6 @@ export type MemoryEntryKind =
 	| "user-preference"
 	| "brand-context"
 	| "short-term-summary"
-	| "middle-term-summary"
 	| "long-term-profile"
 	| "positive-signal";
 export type MemoryEntryScope = "session" | "user" | "workspace";
@@ -1078,6 +1077,26 @@ export async function listMemoryEntries(
 		.toArray();
 }
 
+export async function listRecentShortTermSummariesForUser(
+	database: SmediaMongoDatabase,
+	input: {
+		pluginId: string;
+		userId: string;
+		limit: number;
+	},
+): Promise<MemoryEntryDocument[]> {
+	return database.collections.memoryEntries
+		.find({
+			pluginId: input.pluginId,
+			kind: "short-term-summary",
+			scope: "session",
+			"metadata.participantUserIds": input.userId,
+		})
+		.sort({ updatedAt: -1 })
+		.limit(input.limit)
+		.toArray();
+}
+
 export async function searchChatMessages(
 	database: SmediaMongoDatabase,
 	input: {
@@ -1357,6 +1376,18 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 			},
 		]),
 		collections.memoryEntries.createIndexes([
+			{
+				key: { pluginId: 1, kind: 1, scope: 1, sessionKey: 1 },
+				name: "plugin_kind_scope_sessionKey_unique",
+				unique: true,
+				partialFilterExpression: { sessionKey: { $exists: true, $type: "string" } },
+			},
+			{
+				key: { pluginId: 1, kind: 1, scope: 1, userId: 1 },
+				name: "plugin_kind_scope_userId_unique",
+				unique: true,
+				partialFilterExpression: { userId: { $exists: true, $type: "string" } },
+			},
 			{
 				key: { pluginId: 1, kind: 1, updatedAt: -1 },
 				name: "plugin_kind_updatedAt",

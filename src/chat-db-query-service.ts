@@ -3,12 +3,10 @@ import {
 	getGenerationJobById,
 	getLatestJobContext,
 	listChatMessagesForMemoryWindow,
-	listMemoryEntries,
 	listRecentGenerationJobs,
 	searchChatMessages,
 	type ChatMessageDocument,
 	type GenerationJobDocument,
-	type MemoryEntryDocument,
 	type SmediaMongoDatabase,
 } from "./db/mongo";
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
@@ -16,7 +14,6 @@ import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types"
 const MAX_CHAT_MESSAGES = 12;
 const MAX_JOBS = 5;
 const MAX_KEYWORD_MATCH_MESSAGES = 8;
-const MAX_MEMORY_ENTRIES = 4;
 const MAX_SNIPPET_LENGTH = 1400;
 
 export async function retrieveDbRouteEvidence(input: {
@@ -34,7 +31,7 @@ export async function retrieveDbRouteEvidence(input: {
 
 	const snippets: ChatRouteEvidence["snippets"] = [];
 	const summaryParts: string[] = [];
-	const [memorySnapshot, recentMessages, userMemoryEntries, sessionMemoryEntries, latestJobContext, jobs, keywordMessages] = await Promise.all([
+	const [memorySnapshot, recentMessages, latestJobContext, jobs, keywordMessages] = await Promise.all([
 		getChatMemorySnapshot({
 			database: input.database,
 			pluginId: input.pluginId,
@@ -46,18 +43,6 @@ export async function retrieveDbRouteEvidence(input: {
 			sessionKey: input.sessionKey,
 			kinds: ["chat", "command", "job-update", "status"],
 			limit: MAX_CHAT_MESSAGES,
-		}),
-		listMemoryEntries(input.database, {
-			pluginId: input.pluginId,
-			scope: "user",
-			userId: input.userId,
-			limit: MAX_MEMORY_ENTRIES,
-		}),
-		listMemoryEntries(input.database, {
-			pluginId: input.pluginId,
-			scope: "session",
-			sessionKey: input.sessionKey,
-			limit: MAX_MEMORY_ENTRIES,
 		}),
 		getLatestJobContext(input.database, {
 			pluginId: input.pluginId,
@@ -107,14 +92,13 @@ export async function retrieveDbRouteEvidence(input: {
 		});
 	}
 
-	if (userMemoryEntries.length > 0) {
-		summaryParts.push(`Loaded ${userMemoryEntries.length} user memory entr${userMemoryEntries.length === 1 ? "y" : "ies"}.`);
-		snippets.push(...userMemoryEntries.map((entry) => formatMemorySnippet(entry, "User memory entry")));
-	}
-
-	if (sessionMemoryEntries.length > 0) {
-		summaryParts.push(`Loaded ${sessionMemoryEntries.length} session memory entr${sessionMemoryEntries.length === 1 ? "y" : "ies"}.`);
-		snippets.push(...sessionMemoryEntries.map((entry) => formatMemorySnippet(entry, "Session memory entry")));
+	if (memorySnapshot.unsummarizedMessages.length > 0) {
+		summaryParts.push(`Loaded ${memorySnapshot.unsummarizedMessages.length} unsummarized message${memorySnapshot.unsummarizedMessages.length === 1 ? "" : "s"} since last memory consolidation.`);
+		snippets.push({
+			label: "Unsummarized recent activity",
+			content: truncate(formatMessages(memorySnapshot.unsummarizedMessages)),
+			sourceType: "db",
+		});
 	}
 
 	if (recentMessages.length > 0) {
@@ -233,18 +217,6 @@ function formatLatestJobContext(input: {
 		lines.push(`latestJobUpdate=${input.latestJobUpdate.content}`);
 	}
 	return lines.join("\n");
-}
-
-function formatMemorySnippet(entry: MemoryEntryDocument, labelPrefix: string): ChatRouteEvidence["snippets"][number] {
-	return {
-		label: `${labelPrefix} (${entry.kind})`,
-		content: truncate(entry.content),
-		sourceType: "db",
-		metadata: {
-			scope: entry.scope,
-			updatedAt: entry.updatedAt.toISOString(),
-		},
-	};
 }
 
 function formatJobSnippet(job: GenerationJobDocument): ChatRouteEvidence["snippets"][number] {
