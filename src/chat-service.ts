@@ -14,8 +14,8 @@ import {
 	type ChatMessageDocument,
 	type SmediaMongoDatabase,
 } from "./db/mongo";
+import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logInfo, logWarn } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 
 const DEFAULT_HISTORY_LIMIT = 4;
 const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
@@ -142,15 +142,15 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 		});
 	}
 
-	const client = createOpenAIClient();
-	const response = await client.responses.create({
+	const response = await generateText({
+		task: "chat",
 		model: openAiModel,
 		input: promptInput,
 	});
 
-	const reply = response.output_text.trim();
+	const reply = response.text;
 	if (!reply) {
-		throw new Error("OpenAI did not return a chat response.");
+		throw new Error("The configured AI provider did not return a chat response.");
 	}
 
 	logInfo("Chat response generated", {
@@ -494,7 +494,7 @@ function isFreeTalkOpenAiDebugEnabled(): boolean {
 }
 
 function getChatOpenAiModel(): string {
-	return process.env.OPENAI_MODEL ?? "gpt-5.4";
+	return resolveAiTextModel("chat");
 }
 
 function estimateTokens(text: string | null | undefined): number {

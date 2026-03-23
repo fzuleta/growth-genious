@@ -1,11 +1,10 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import type { PluginContract, PluginRouteHandler, PluginRouteMatch } from "./plugin-contract";
 import type { ChatRouteDecision } from "./chat-routing-types";
+import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logWarn } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 import { listPluginCustomRoutes, resolvePluginCustomRouteByName, resolvePluginRouteMatch } from "./plugin-contract";
 
-const DEFAULT_ROUTER_MODEL = process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
 const DIRECT_CONVERSATION_MAX_LENGTH = 24;
 
 export interface ChatRouteClassificationResult {
@@ -21,6 +20,7 @@ export async function classifyChatRoute(input: {
 	username: string;
 	plugin?: PluginContract;
 }): Promise<ChatRouteClassificationResult> {
+	const model = getChatRouterModel();
 	const normalizedContent = input.content.trim();
 	const promptInput = await buildChatRoutePromptInput({
 		channelId: input.channelId,
@@ -32,7 +32,7 @@ export async function classifyChatRoute(input: {
 	if (!normalizedContent) {
 		return {
 			decision: buildFallbackDecision("conversation", normalizedContent, "empty-content"),
-			model: DEFAULT_ROUTER_MODEL,
+			model,
 			promptInput,
 			customRouteHandler: null,
 		};
@@ -46,7 +46,7 @@ export async function classifyChatRoute(input: {
 	if (customRouteMatch) {
 		return {
 			decision: buildCustomRouteDecision(customRouteMatch, normalizedContent),
-			model: DEFAULT_ROUTER_MODEL,
+			model,
 			promptInput,
 			customRouteHandler: customRouteMatch.handle,
 		};
@@ -57,20 +57,20 @@ export async function classifyChatRoute(input: {
 		const enriched = await enrichDecisionWithThemeResolver(heuristicDecision, normalizedContent);
 		return {
 			decision: enriched,
-			model: DEFAULT_ROUTER_MODEL,
+			model,
 			promptInput,
 			customRouteHandler: null,
 		};
 	}
 
 	try {
-		const client = createOpenAIClient();
-		const response = await client.responses.create({
-			model: DEFAULT_ROUTER_MODEL,
+		const response = await generateText({
+			task: "router",
+			model,
 			input: promptInput,
 		});
 
-		const llmDecision = parseClassifierOutput(response.output_text, normalizedContent);
+		const llmDecision = parseClassifierOutput(response.text, normalizedContent);
 		const enriched = await enrichDecisionWithThemeResolver(llmDecision, normalizedContent);
 		const declaredCustomRoute = resolveDeclaredCustomRoute(input.plugin, enriched, {
 			content: normalizedContent,
@@ -80,7 +80,7 @@ export async function classifyChatRoute(input: {
 		if (declaredCustomRoute) {
 			return {
 				decision: buildCustomRouteDecision(declaredCustomRoute, normalizedContent),
-				model: DEFAULT_ROUTER_MODEL,
+				model,
 				promptInput,
 				customRouteHandler: declaredCustomRoute.handle,
 			};
@@ -89,7 +89,7 @@ export async function classifyChatRoute(input: {
 		if (enriched.route === "custom") {
 			return {
 				decision: buildFallbackDecision("conversation", normalizedContent, "unknown-plugin-custom-route"),
-				model: DEFAULT_ROUTER_MODEL,
+				model,
 				promptInput,
 				customRouteHandler: null,
 			};
@@ -97,7 +97,7 @@ export async function classifyChatRoute(input: {
 
 		return {
 			decision: enriched,
-			model: DEFAULT_ROUTER_MODEL,
+			model,
 			promptInput,
 			customRouteHandler: null,
 		};
@@ -109,7 +109,7 @@ export async function classifyChatRoute(input: {
 		});
 		return {
 			decision: buildFallbackDecision("conversation", normalizedContent, "classifier-error"),
-			model: DEFAULT_ROUTER_MODEL,
+			model,
 			promptInput,
 			customRouteHandler: null,
 		};
@@ -117,7 +117,7 @@ export async function classifyChatRoute(input: {
 }
 
 export function getChatRouterModel(): string {
-	return DEFAULT_ROUTER_MODEL;
+	return resolveAiTextModel("router");
 }
 
 async function buildChatRoutePromptInput(input: {

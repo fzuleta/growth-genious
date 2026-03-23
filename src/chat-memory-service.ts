@@ -12,8 +12,8 @@ import {
 	type MemoryEntryDocument,
 	type SmediaMongoDatabase,
 } from "./db/mongo";
+import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logInfo, logWarn } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 
 const SHORT_TERM_SOURCE_LIMIT = 50;
 const LONG_TERM_SOURCE_LIMIT = 50;
@@ -534,8 +534,8 @@ async function summarizeLongTermProfile(input: {
 }
 
 async function requestText(prompt: string): Promise<string> {
-	const client = createOpenAIClient();
-	const response = await client.responses.create({
+	const response = await generateText({
+		task: "memory",
 		model: getChatMemoryModel(),
 		input: [
 			{
@@ -559,9 +559,9 @@ async function requestText(prompt: string): Promise<string> {
 		] as ResponseInputItem[],
 	});
 
-	const text = response.output_text.trim();
+	const text = response.text;
 	if (!text) {
-		throw new Error("OpenAI did not return memory output.");
+		throw new Error("The configured AI provider did not return memory output.");
 	}
 
 	return text;
@@ -617,5 +617,5 @@ function trimToWordLimit(text: string, limit: number): string {
 }
 
 function getChatMemoryModel(): string {
-	return process.env.OPENAI_CHAT_MEMORY_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-5.4";
+	return resolveAiTextModel("memory");
 }

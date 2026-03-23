@@ -1,8 +1,9 @@
 import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import type { ResponseInputItem } from "openai/resources/responses/responses";
 import type { PluginCommand, PluginCommandContext, PluginCommandResult, PluginRouteRequest } from "../../../plugin-contract";
-import { createOpenAIClient } from "../../../openai/openai";
+import { generateText, resolveAiTextModel } from "../../../ai/text-router";
 
 const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
 
@@ -931,38 +932,44 @@ async function executeComprehensiveReport(
 }
 
 async function generateComprehensiveAISummary(analyticsData: string, dateRange: AnalyticsDateRange): Promise<string> {
-	const client = createOpenAIClient();
-	const model = process.env.OPENAI_ANALYTICS_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-4o";
+	const model = getAnalyticsSummaryModel();
 
-	const response = await client.responses.create({
+	const response = await generateText({
+		task: "analytics-summary",
 		model,
 		input: [
 			{
 				role: "system",
-				content: [
-					"You are a senior growth analyst. The user will provide Google Analytics 4 data from the last reporting period.",
-					"Your job is to produce a concise, actionable report in Markdown with:",
-					"1. **Executive Summary** — 2-3 sentence high-level takeaway.",
-					"2. **Key Metrics** — highlight the most important numbers (users, sessions, engagement, bounce rate, top events).",
-					"3. **Trends & Patterns** — what changed, what stands out, any anomalies.",
-					"4. **Top Content & Sources** — which pages and traffic sources are performing well or poorly.",
-					"5. **Custom Explore Insights** — insights from any custom explore data included.",
-					"6. **Recommendations** — 3-5 concrete, prioritized actions to improve growth.",
-					"",
-					"Be specific with numbers. Reference actual data points. Keep it concise but thorough.",
-					"Format for Discord (Markdown). Do not exceed 1800 characters in total.",
-				].join("\n"),
+				content: [{
+					type: "input_text",
+					text: [
+						"You are a senior growth analyst. The user will provide Google Analytics 4 data from the last reporting period.",
+						"Your job is to produce a concise, actionable report in Markdown with:",
+						"1. **Executive Summary** — 2-3 sentence high-level takeaway.",
+						"2. **Key Metrics** — highlight the most important numbers (users, sessions, engagement, bounce rate, top events).",
+						"3. **Trends & Patterns** — what changed, what stands out, any anomalies.",
+						"4. **Top Content & Sources** — which pages and traffic sources are performing well or poorly.",
+						"5. **Custom Explore Insights** — insights from any custom explore data included.",
+						"6. **Recommendations** — 3-5 concrete, prioritized actions to improve growth.",
+						"",
+						"Be specific with numbers. Reference actual data points. Keep it concise but thorough.",
+						"Format for Discord (Markdown). Do not exceed 1800 characters in total.",
+					].join("\n"),
+				}],
 			},
 			{
 				role: "user",
-				content: `Here is the analytics data (${dateRange.label}, ${dateRange.startDate} to ${dateRange.endDate}):\n\n${analyticsData}`,
+				content: [{
+					type: "input_text",
+					text: `Here is the analytics data (${dateRange.label}, ${dateRange.startDate} to ${dateRange.endDate}):\n\n${analyticsData}`,
+				}],
 			},
-		],
+		] as ResponseInputItem[],
 	});
 
-	const text = response.output_text.trim();
+	const text = response.text;
 	if (!text) {
-		return "*AI summary unavailable — OpenAI returned an empty response.*";
+		return "*AI summary unavailable — the configured AI provider returned an empty response.*";
 	}
 
 	return text;
@@ -2198,9 +2205,6 @@ function inferAnalyticsDateRangeArgs(content: string): string | null {
 	return "7d";
 }
 
-const NL_ANALYTICS_MODEL = process.env.OPENAI_NL_ANALYTICS_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
-const NL_ANALYTICS_REPLY_MODEL = process.env.OPENAI_NL_ANALYTICS_REPLY_MODEL?.trim() || process.env.OPENAI_ANALYTICS_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-5.4-mini";
-
 const NL_ANALYTICS_AVAILABLE_PRESETS = Object.keys(PRESET_REPORT_CONFIG);
 
 const NL_ANALYTICS_SYSTEM_PROMPT = [
@@ -2258,10 +2262,11 @@ interface NLAnalyticsModelResponse {
 }
 
 async function translateNaturalLanguageAnalyticsIntent(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+	const model = getAnalyticsIntentModel();
 	try {
-		const client = createOpenAIClient();
-		const response = await client.responses.create({
-			model: NL_ANALYTICS_MODEL,
+		const response = await generateText({
+			task: "analytics-intent",
+			model,
 			input: [
 				{
 					role: "system",
@@ -2274,7 +2279,7 @@ async function translateNaturalLanguageAnalyticsIntent(content: string): Promise
 			],
 		});
 
-		const parsed = parseNLAnalyticsModelResponse(response.output_text);
+		const parsed = parseNLAnalyticsModelResponse(response.text);
 		if (!parsed || !parsed.isAnalytics || !parsed.preset) {
 			return null;
 		}
@@ -2318,10 +2323,11 @@ async function generateNaturalLanguageAnalyticsReply(input: {
 	summaryMarkdown: string;
 	fallbackReply: string;
 }): Promise<string> {
+	const model = getAnalyticsReplyModel();
 	try {
-		const client = createOpenAIClient();
-		const response = await client.responses.create({
-			model: NL_ANALYTICS_REPLY_MODEL,
+		const response = await generateText({
+			task: "analytics-reply",
+			model,
 			input: [
 				{
 					role: "system",
@@ -2357,11 +2363,23 @@ async function generateNaturalLanguageAnalyticsReply(input: {
 			],
 		});
 
-		const text = response.output_text.trim();
+		const text = response.text.trim();
 		return text || input.fallbackReply;
 	} catch {
 		return input.fallbackReply;
 	}
+}
+
+function getAnalyticsSummaryModel(): string {
+	return resolveAiTextModel("analytics-summary");
+}
+
+function getAnalyticsIntentModel(): string {
+	return resolveAiTextModel("analytics-intent");
+}
+
+function getAnalyticsReplyModel(): string {
+	return resolveAiTextModel("analytics-reply");
 }
 
 function parseNLAnalyticsModelResponse(text: string): NLAnalyticsModelResponse | null {

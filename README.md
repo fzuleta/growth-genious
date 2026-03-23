@@ -214,12 +214,16 @@ Starter scaffold files live under `workspace-template/app-template/`.
 
 ## Required env
 
+- `AI_PROVIDER` (`openai` by default, or `openrouter`)
 - `OPENAI_API_KEY`
 - `DISCORD_BOT_KEY`
 - `DISCORD_FELI_ID`
 
 ## Optional env
 
+- `OPENROUTER_API_KEY` (required when `AI_PROVIDER=openrouter`)
+- `OPENROUTER_HTTP_REFERER`
+- `OPENROUTER_X_TITLE`
 - `DISCORD_ALLOWED_CHANNEL_IDS`
 - `DISCORD_CHANNEL_ID`
 - `MONGODB_URI`

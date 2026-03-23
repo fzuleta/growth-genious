@@ -1,12 +1,11 @@
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
+import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logWarn } from "./helpers/log";
-import { createOpenAIClient } from "./openai/openai";
 
 const EXISTING_FOLLOW_UP_REGEX = /\b(if you want|want me to|would you like|i can also|reply with|next step|let me know if you want)\b/i;
 const CASUAL_MESSAGE_REGEX = /^(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|great|sounds good|got it)[!.?\s]*$/i;
 const NEXT_STEP_PREFIX = "Next step: ";
 const INLINE_NEXT_STEP_COOLDOWN_MS = 30 * 60 * 1000;
-const NEXT_STEP_MODEL = process.env.OPENAI_NEXT_STEP_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
 
 interface RecentAssistantReply {
 	content: string;
@@ -133,10 +132,11 @@ async function generateModelNextStep(input: {
 	routeDecision?: ChatRouteDecision;
 	routeEvidence?: ChatRouteEvidence | null;
 }): Promise<string | null> {
+	const model = getNextStepModel();
 	try {
-		const client = createOpenAIClient();
-		const response = await client.responses.create({
-			model: NEXT_STEP_MODEL,
+		const response = await generateText({
+			task: "next-step",
+			model,
 			input: [
 				{
 					role: "system",
@@ -179,7 +179,7 @@ async function generateModelNextStep(input: {
 			],
 		});
 
-		const parsed = parseModelNextStep(response.output_text);
+		const parsed = parseModelNextStep(response.text);
 		if (!parsed || parsed.action !== "suggest-next-step" || !parsed.suggestion) {
 			return null;
 		}
@@ -192,10 +192,14 @@ async function generateModelNextStep(input: {
 	} catch (error: unknown) {
 		logWarn("Inline next-step generation failed; falling back to heuristics", {
 			message: error instanceof Error ? error.message : String(error),
-			model: NEXT_STEP_MODEL,
+			model,
 		});
 		return null;
 	}
+}
+
+function getNextStepModel(): string {
+	return resolveAiTextModel("next-step");
 }
 
 function parseModelNextStep(text: string): { action: "none" | "suggest-next-step"; suggestion: string | null; confidence: "low" | "medium" | "high" } | null {
