@@ -368,6 +368,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 				const customReplyWithNextStep = await appendInlineNextStep({
 					reply: customReply,
 					userContent: combinedContent,
+					plugin: currentPlugin,
 					routeDecision,
 					routeEvidence,
 					recentAssistantReplies,
@@ -386,6 +387,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		const reply = await generateChatReply({
 			database,
 			pluginId: currentPlugin.id,
+			plugin: currentPlugin,
 			assistantName: currentPlugin.name,
 			guildId: lastMessage.guildId!,
 			channelId: lastMessage.channelId,
@@ -400,6 +402,7 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 		const replyWithNextStep = await appendInlineNextStep({
 			reply,
 			userContent: combinedContent,
+			plugin: currentPlugin,
 			routeDecision,
 			routeEvidence,
 			recentAssistantReplies,

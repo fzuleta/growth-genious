@@ -1,5 +1,6 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
+import type { PluginContract } from "./plugin-contract";
 import {
 	getChatMemorySnapshot,
 	type ChatMemorySnapshot,
@@ -23,6 +24,7 @@ const TOKEN_BUDGET_CHARS_PER_TOKEN = 4;
 export interface GenerateChatReplyInput {
 	database: SmediaMongoDatabase;
 	pluginId: string;
+	plugin?: PluginContract;
 	assistantName: string;
 	guildId: string;
 	channelId: string;
@@ -35,7 +37,7 @@ export interface GenerateChatReplyInput {
 }
 
 export async function generateChatReply(input: GenerateChatReplyInput): Promise<string> {
-	const openAiModel = getChatOpenAiModel();
+	const openAiModel = getChatOpenAiModel(input.plugin);
 	const enableFreeTalkOpenAiDebug = isFreeTalkOpenAiDebugEnabled();
 	const sessionKey = buildChatSessionKey({
 		pluginId: input.pluginId,
@@ -145,6 +147,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	const response = await generateText({
 		task: "chat",
 		model: openAiModel,
+		plugin: input.plugin,
 		input: promptInput,
 	});
 
@@ -493,8 +496,8 @@ function isFreeTalkOpenAiDebugEnabled(): boolean {
 	return readBooleanEnv(process.env.DEBUG_FREETALK_OPENAI_INPUTS);
 }
 
-function getChatOpenAiModel(): string {
-	return resolveAiTextModel("chat");
+function getChatOpenAiModel(plugin?: PluginContract): string {
+	return resolveAiTextModel("chat", { plugin });
 }
 
 function estimateTokens(text: string | null | undefined): number {

@@ -1,6 +1,7 @@
 import type { ChatRouteDecision, ChatRouteEvidence } from "./chat-routing-types";
 import { generateText, resolveAiTextModel } from "./ai/text-router";
 import { logWarn } from "./helpers/log";
+import type { PluginContract } from "./plugin-contract";
 
 const EXISTING_FOLLOW_UP_REGEX = /\b(if you want|want me to|would you like|i can also|reply with|next step|let me know if you want)\b/i;
 const CASUAL_MESSAGE_REGEX = /^(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|great|sounds good|got it)[!.?\s]*$/i;
@@ -15,6 +16,7 @@ interface RecentAssistantReply {
 export async function appendInlineNextStep(input: {
 	reply: string;
 	userContent: string;
+	plugin?: PluginContract;
 	routeDecision?: ChatRouteDecision;
 	routeEvidence?: ChatRouteEvidence | null;
 	recentAssistantReplies?: RecentAssistantReply[];
@@ -129,14 +131,16 @@ function buildHeuristicInlineNextStep(input: {
 async function generateModelNextStep(input: {
 	reply: string;
 	userContent: string;
+	plugin?: PluginContract;
 	routeDecision?: ChatRouteDecision;
 	routeEvidence?: ChatRouteEvidence | null;
 }): Promise<string | null> {
-	const model = getNextStepModel();
+	const model = getNextStepModel(input.plugin);
 	try {
 		const response = await generateText({
 			task: "next-step",
 			model,
+			plugin: input.plugin,
 			input: [
 				{
 					role: "system",
@@ -198,8 +202,8 @@ async function generateModelNextStep(input: {
 	}
 }
 
-function getNextStepModel(): string {
-	return resolveAiTextModel("next-step");
+function getNextStepModel(plugin?: PluginContract): string {
+	return resolveAiTextModel("next-step", { plugin });
 }
 
 function parseModelNextStep(text: string): { action: "none" | "suggest-next-step"; suggestion: string | null; confidence: "low" | "medium" | "high" } | null {

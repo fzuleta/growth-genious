@@ -1,6 +1,7 @@
 import path from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Message } from "discord.js";
+import type { ResolvePluginAiTaskConfig } from "./ai/contracts";
 import type { ChatRouteConfidence } from "./chat-routing-types";
 import type { SmediaMongoDatabase } from "./db/mongo";
 
@@ -70,6 +71,7 @@ export interface PluginContract {
 	id: string;
 	name: string;
 	discordBotKey?: string;
+	resolveAiTaskConfig?: ResolvePluginAiTaskConfig;
 	envFilePath: string;
 	rootDir: string;
 	outputDir: string;

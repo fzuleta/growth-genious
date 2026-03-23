@@ -2,7 +2,7 @@ import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
-import type { PluginCommand, PluginCommandContext, PluginCommandResult, PluginRouteRequest } from "../../../plugin-contract";
+import type { PluginCommand, PluginCommandContext, PluginCommandResult, PluginContract, PluginRouteRequest } from "../../../plugin-contract";
 import { generateText, resolveAiTextModel } from "../../../ai/text-router";
 
 const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
@@ -414,6 +414,7 @@ export async function executeAnalyticsInvocation(
 		propertyId,
 		accessToken,
 		operation,
+		plugin: input.plugin,
 		exploreDir,
 	});
 
@@ -477,6 +478,7 @@ export async function executeAnalyticsInvocation(
 			analyticsArgs: options.args,
 			summaryMarkdown: execution.summaryMarkdown,
 			fallbackReply: execution.reply,
+			plugin: input.plugin,
 		  })
 		: execution.reply;
 
@@ -538,7 +540,10 @@ export function matchNaturalLanguageAnalyticsRequest(content: string): Analytics
 	};
 }
 
-export async function matchNaturalLanguageAnalyticsRequestWithModel(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
+export async function matchNaturalLanguageAnalyticsRequestWithModel(
+	content: string,
+	plugin?: PluginContract,
+): Promise<AnalyticsNaturalLanguageIntent | null> {
 	const normalized = content.trim();
 	if (!normalized) {
 		return null;
@@ -548,7 +553,7 @@ export async function matchNaturalLanguageAnalyticsRequestWithModel(content: str
 		return null;
 	}
 
-	const modelResult = await translateNaturalLanguageAnalyticsIntent(normalized);
+	const modelResult = await translateNaturalLanguageAnalyticsIntent(normalized, plugin);
 	if (modelResult) {
 		return modelResult;
 	}
@@ -660,13 +665,14 @@ async function executeAnalyticsOperation(input: {
 	propertyId: string;
 	accessToken: string;
 	operation: AnalyticsOperationRequest;
+	plugin: PluginContract;
 	exploreDir: string;
 }): Promise<AnalyticsExecutionResult> {
 	switch (input.operation.kind) {
 		case "help":
 			return await buildHelpExecutionResult(input.exploreDir);
 		case "comprehensive":
-			return await executeComprehensiveReport(input.propertyId, input.accessToken, input.operation.dateRange!, input.exploreDir);
+			return await executeComprehensiveReport(input.propertyId, input.accessToken, input.operation.dateRange!, input.exploreDir, input.plugin);
 		case "legacy-report":
 			return await executeLegacyReport(input.propertyId, input.accessToken, input.operation.dateRange!);
 		case "metadata":
@@ -768,6 +774,7 @@ async function executeComprehensiveReport(
 	accessToken: string,
 	dateRange: AnalyticsDateRange,
 	exploreDir: string,
+	plugin: PluginContract,
 ): Promise<AnalyticsExecutionResult> {
 	const dateRanges = [{ startDate: dateRange.startDate, endDate: dateRange.endDate }];
 
@@ -889,7 +896,7 @@ async function executeComprehensiveReport(
 	const analyticsDataMarkdown = dataSections.join("\n");
 
 	// Send to OpenAI for summary and recommendations
-	const aiSummary = await generateComprehensiveAISummary(analyticsDataMarkdown, dateRange);
+	const aiSummary = await generateComprehensiveAISummary(analyticsDataMarkdown, dateRange, plugin);
 
 	const summaryMarkdown = [
 		`# Comprehensive Analytics Report`,
@@ -931,12 +938,17 @@ async function executeComprehensiveReport(
 	};
 }
 
-async function generateComprehensiveAISummary(analyticsData: string, dateRange: AnalyticsDateRange): Promise<string> {
-	const model = getAnalyticsSummaryModel();
+async function generateComprehensiveAISummary(
+	analyticsData: string,
+	dateRange: AnalyticsDateRange,
+	plugin: PluginContract,
+): Promise<string> {
+	const model = getAnalyticsSummaryModel(plugin);
 
 	const response = await generateText({
 		task: "analytics-summary",
 		model,
+		plugin,
 		input: [
 			{
 				role: "system",
@@ -2261,12 +2273,13 @@ interface NLAnalyticsModelResponse {
 	confidence: "low" | "medium" | "high";
 }
 
-async function translateNaturalLanguageAnalyticsIntent(content: string): Promise<AnalyticsNaturalLanguageIntent | null> {
-	const model = getAnalyticsIntentModel();
+async function translateNaturalLanguageAnalyticsIntent(content: string, plugin?: PluginContract): Promise<AnalyticsNaturalLanguageIntent | null> {
+	const model = getAnalyticsIntentModel(plugin);
 	try {
 		const response = await generateText({
 			task: "analytics-intent",
 			model,
+			plugin,
 			input: [
 				{
 					role: "system",
@@ -2322,12 +2335,14 @@ async function generateNaturalLanguageAnalyticsReply(input: {
 	analyticsArgs: string;
 	summaryMarkdown: string;
 	fallbackReply: string;
+	plugin: PluginContract;
 }): Promise<string> {
-	const model = getAnalyticsReplyModel();
+	const model = getAnalyticsReplyModel(input.plugin);
 	try {
 		const response = await generateText({
 			task: "analytics-reply",
 			model,
+			plugin: input.plugin,
 			input: [
 				{
 					role: "system",
@@ -2370,16 +2385,16 @@ async function generateNaturalLanguageAnalyticsReply(input: {
 	}
 }
 
-function getAnalyticsSummaryModel(): string {
-	return resolveAiTextModel("analytics-summary");
+function getAnalyticsSummaryModel(plugin?: PluginContract): string {
+	return resolveAiTextModel("analytics-summary", { plugin });
 }
 
-function getAnalyticsIntentModel(): string {
-	return resolveAiTextModel("analytics-intent");
+function getAnalyticsIntentModel(plugin?: PluginContract): string {
+	return resolveAiTextModel("analytics-intent", { plugin });
 }
 
-function getAnalyticsReplyModel(): string {
-	return resolveAiTextModel("analytics-reply");
+function getAnalyticsReplyModel(plugin?: PluginContract): string {
+	return resolveAiTextModel("analytics-reply", { plugin });
 }
 
 function parseNLAnalyticsModelResponse(text: string): NLAnalyticsModelResponse | null {
