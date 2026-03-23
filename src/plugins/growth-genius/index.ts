@@ -4,7 +4,7 @@ import {
 	analyticsCommand,
 	executeAnalyticsInvocation,
 	formatAnalyticsCommandResult,
-	matchNaturalLanguageAnalyticsRequest,
+	matchNaturalLanguageAnalyticsRequestWithModel,
 } from "./commands/analytics";
 
 export const growthGeniusPlugin: PluginContract = {
@@ -15,8 +15,8 @@ export const growthGeniusPlugin: PluginContract = {
 	outputDir: "output/growth-genius",
 	requiredEnv: [],
 	commands: [analyticsCommand],
-	routeRequest: (input) => {
-		const intent = matchNaturalLanguageAnalyticsRequest(input.content);
+	routeRequest: async (input) => {
+		const intent = await matchNaturalLanguageAnalyticsRequestWithModel(input.content);
 		if (!intent) {
 			return null;
 		}
@@ -25,7 +25,7 @@ export const growthGeniusPlugin: PluginContract = {
 			commandName: "analytics",
 			routeName: "analytics-natural-language",
 			subject: intent.subject,
-			confidence: "medium",
+			confidence: intent.reason.includes("-high") ? "high" : "medium",
 			requestedSources: ["google-analytics"],
 			reason: intent.reason,
 			handle: async (handlerInput) => {
