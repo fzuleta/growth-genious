@@ -1,7 +1,7 @@
 import { createSign } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import type { PluginCommand, PluginRouteRequest } from "../../../plugin-contract";
+import type { PluginCommand, PluginCommandContext, PluginCommandResult, PluginRouteRequest } from "../../../plugin-contract";
 import { createOpenAIClient } from "../../../openai/openai";
 
 const ANALYTICS_COMMAND_ALIASES = ["analytics", "a"];
@@ -113,6 +113,12 @@ interface AnalyticsExecutionResult {
 	responsePayload: JsonObject;
 	summaryMarkdown: string;
 	legacyReportArtifact?: JsonObject;
+}
+
+export interface AnalyticsNaturalLanguageIntent {
+	args: string;
+	subject: string;
+	reason: string;
 }
 
 interface AdminResourceConfig {
@@ -369,75 +375,135 @@ export const analyticsCommand: PluginCommand = {
 		return null;
 	},
 	handle: async (input) => {
-		const analyticsOutputDir = path.join(input.outputDir, "analytics");
-		await mkdir(analyticsOutputDir, { recursive: true });
-
-		const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
-		const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
-		const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
-		const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
-		const operation = parseAnalyticsOperation(input.args);
-
-		const accessToken = await getGoogleAccessToken({
-			serviceAccountEmail,
-			serviceAccountPrivateKey,
+		return executeAnalyticsInvocation(input, {
+			args: input.args,
+			requestSource: "/analytics",
 		});
-
-		const execution = await executeAnalyticsOperation({
-			propertyId,
-			accessToken,
-			operation,
-			exploreDir,
-		});
-
-		const requestedAt = new Date().toISOString();
-		const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
-		const responseArtifactPath = path.join(analyticsOutputDir, "latest-response.json");
-		const summaryArtifactPath = path.join(analyticsOutputDir, "latest-summary.md");
-		const legacyReportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
-
-		await writeFile(
-			requestArtifactPath,
-			JSON.stringify(
-				{
-					pluginId: input.plugin.id,
-					command: "/analytics",
-					requestedAt,
-					requestedBy: {
-						userId: input.message.author.id,
-						username: input.message.author.username,
-					},
-					args: input.args,
-					pluginRootDir: input.plugin.rootDir,
-					outputDir: input.plugin.outputDir,
-					propertyId,
-					operation: execution.requestPayload,
-				},
-				null,
-				2,
-			),
-			"utf8",
-		);
-		await writeFile(responseArtifactPath, JSON.stringify(execution.responsePayload, null, 2), "utf8");
-		await writeFile(summaryArtifactPath, execution.summaryMarkdown, "utf8");
-
-		const outputFiles = [
-			path.relative(process.cwd(), requestArtifactPath),
-			path.relative(process.cwd(), responseArtifactPath),
-			path.relative(process.cwd(), summaryArtifactPath),
-		];
-
-		if (execution.legacyReportArtifact) {
-			await writeFile(legacyReportArtifactPath, JSON.stringify(execution.legacyReportArtifact, null, 2), "utf8");
-			outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
-		}
-
-		return {
-			reply: execution.reply,
-			outputFiles,
-		};
 	},
 };
+
+export async function executeAnalyticsInvocation(
+	input: PluginCommandContext,
+	options: {
+		args: string;
+		requestSource: string;
+		originalPrompt?: string;
+	},
+): Promise<PluginCommandResult> {
+	const analyticsOutputDir = path.join(input.outputDir, "analytics");
+	await mkdir(analyticsOutputDir, { recursive: true });
+
+	const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
+	const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
+	const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
+	const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
+	const operation = parseAnalyticsOperation(options.args);
+
+	const accessToken = await getGoogleAccessToken({
+		serviceAccountEmail,
+		serviceAccountPrivateKey,
+	});
+
+	const execution = await executeAnalyticsOperation({
+		propertyId,
+		accessToken,
+		operation,
+		exploreDir,
+	});
+
+	const requestedAt = new Date().toISOString();
+	const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
+	const responseArtifactPath = path.join(analyticsOutputDir, "latest-response.json");
+	const summaryArtifactPath = path.join(analyticsOutputDir, "latest-summary.md");
+	const legacyReportArtifactPath = path.join(analyticsOutputDir, "latest-report.json");
+
+	await writeFile(
+		requestArtifactPath,
+		JSON.stringify(
+			{
+				pluginId: input.plugin.id,
+				command: options.requestSource,
+				requestedAt,
+				requestedBy: {
+					userId: input.message.author.id,
+					username: input.message.author.username,
+				},
+				args: options.args,
+				originalPrompt: options.originalPrompt ?? null,
+				pluginRootDir: input.plugin.rootDir,
+				outputDir: input.plugin.outputDir,
+				propertyId,
+				operation: execution.requestPayload,
+			},
+			null,
+			2,
+		),
+		"utf8",
+	);
+	await writeFile(responseArtifactPath, JSON.stringify(execution.responsePayload, null, 2), "utf8");
+	await writeFile(summaryArtifactPath, execution.summaryMarkdown, "utf8");
+
+	const outputFiles = [
+		path.relative(process.cwd(), requestArtifactPath),
+		path.relative(process.cwd(), responseArtifactPath),
+		path.relative(process.cwd(), summaryArtifactPath),
+	];
+
+	if (execution.legacyReportArtifact) {
+		await writeFile(legacyReportArtifactPath, JSON.stringify(execution.legacyReportArtifact, null, 2), "utf8");
+		outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
+	}
+
+	return {
+		reply: execution.reply,
+		outputFiles,
+	};
+}
+
+export function formatAnalyticsCommandResult(input: {
+	pluginId: string;
+	commandName: string;
+	outputDir: string;
+	result: PluginCommandResult | string;
+}): string {
+	if (typeof input.result === "string") {
+		return input.result;
+	}
+
+	const outputFiles = input.result.outputFiles?.filter((value) => value.trim().length > 0) ?? [];
+	if (outputFiles.length === 0) {
+		return input.result.reply;
+	}
+
+	return [
+		input.result.reply,
+		`command=/${input.commandName}`,
+		`plugin=${input.pluginId}`,
+		`outputDir=${path.relative(process.cwd(), input.outputDir) || input.outputDir}`,
+		`outputFiles=${outputFiles.join(",")}`,
+	].join("\n");
+}
+
+export function matchNaturalLanguageAnalyticsRequest(content: string): AnalyticsNaturalLanguageIntent | null {
+	const normalized = content.trim().toLowerCase();
+	if (!normalized) {
+		return null;
+	}
+
+	if (!looksLikeAnalyticsNaturalLanguageRequest(normalized)) {
+		return null;
+	}
+
+	const preset = inferAnalyticsPreset(normalized);
+	const dateRange = inferAnalyticsDateRangeArgs(normalized);
+	const args = dateRange ? `${preset} ${dateRange}` : preset;
+
+	return {
+		args,
+		subject: `analytics-${preset}`,
+		reason: "analytics-natural-language-match",
+	};
+}
 
 function parseAnalyticsOperation(args: string): AnalyticsOperationRequest {
 	const trimmed = args.trim();
@@ -1995,6 +2061,91 @@ function buildHelpText(): string {
 		"- '/analytics realtime {json}'",
 		"- '/analytics help'",
 	].join("\n");
+}
+
+function looksLikeAnalyticsNaturalLanguageRequest(content: string): boolean {
+	if (/^\/analytics\b/.test(content)) {
+		return false;
+	}
+
+	return (
+		/(how did we do|how are we doing|how did .* do|performance|analytics|ga4|traffic|sessions|active users|new users|engagement|bounce rate|top pages|top page|top events|events|traffic sources|sources|campaign|landing page|landing pages|device|devices|browser|geo|country|city|retention|realtime|live users|right now)/i.test(content) &&
+		/(yesterday|today|last\s+\d+\s+days?|last\s+week|past\s+week|last\s+month|past\s+month|right now|currently|this week|this month|daily|weekly|monthly|top|best|worst|how did|how are)/i.test(content)
+	);
+}
+
+function inferAnalyticsPreset(content: string): string {
+	if (/\b(realtime|right now|currently|live users?)\b/i.test(content)) {
+		return "realtime";
+	}
+	if (/\b(top events?|events?)\b/i.test(content)) {
+		return "events";
+	}
+	if (/\b(top pages?|pages?|content)\b/i.test(content)) {
+		return "pages";
+	}
+	if (/\b(source|sources|traffic|campaign|acquisition)\b/i.test(content)) {
+		return "sources";
+	}
+	if (/\b(device|devices|browser|mobile|desktop)\b/i.test(content)) {
+		return "devices";
+	}
+	if (/\b(country|city|geo|geography|region)\b/i.test(content)) {
+		return "geo";
+	}
+	if (/\b(landing|entry page|entry pages)\b/i.test(content)) {
+		return "landing";
+	}
+	if (/\b(engagement|bounce|session duration|engaged)\b/i.test(content)) {
+		return "engagement";
+	}
+
+	return "overview";
+}
+
+function inferAnalyticsDateRangeArgs(content: string): string | null {
+	if (/\b(realtime|right now|currently|live users?)\b/i.test(content)) {
+		return null;
+	}
+
+	const explicitDays = content.match(/\b(?:last|past)\s+(\d{1,2})\s+days?\b/i);
+	if (explicitDays) {
+		return `${clampLookback(Number(explicitDays[1]))}d`;
+	}
+
+	if (/\byesterday\b/i.test(content)) {
+		const yesterday = new Date();
+		yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+		const value = formatDate(yesterday);
+		return `${value} ${value}`;
+	}
+
+	if (/\btoday\b/i.test(content)) {
+		const today = formatDate(new Date());
+		return `${today} ${today}`;
+	}
+
+	if (/\b(last|past)\s+week\b/i.test(content) || /\bthis week\b/i.test(content)) {
+		return "7d";
+	}
+
+	if (/\b(last|past)\s+month\b/i.test(content) || /\bthis month\b/i.test(content)) {
+		return "30d";
+	}
+
+	if (/\bweekly\b/i.test(content)) {
+		return "7d";
+	}
+
+	if (/\bmonthly\b/i.test(content)) {
+		return "30d";
+	}
+
+	if (/\bdaily\b/i.test(content)) {
+		return "1d";
+	}
+
+	return "7d";
 }
 
 function cloneJsonObject(value: JsonObject): JsonObject {

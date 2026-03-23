@@ -133,6 +133,27 @@ export async function getActiveSelfModifySession(
 	);
 }
 
+export async function listAwaitingApprovalSessions(
+	database: SmediaMongoDatabase,
+	input: {
+		pluginId: string;
+		olderThanOrEqual: Date;
+		limit: number;
+	},
+): Promise<SelfModifySessionDocument[]> {
+	return getCollection(database)
+		.find(
+			{
+				pluginId: input.pluginId,
+				state: "awaiting-approval" as SelfModifyState,
+				updatedAt: { $lte: input.olderThanOrEqual },
+			},
+		)
+		.sort({ updatedAt: 1 })
+		.limit(input.limit)
+		.toArray();
+}
+
 export async function getSelfModifySessionById(
 	database: SmediaMongoDatabase,
 	sessionId: string,

@@ -18,6 +18,7 @@ export const SMEDIA_COLLECTION_NAMES = {
 	generationJobs: "smedia-generation-jobs",
 	contextDocuments: "smedia-context-documents",
 	openAiDebugInputs: "smedia-openai-debug-inputs",
+	proactiveOutbox: "smedia-proactive-outbox",
 } as const;
 
 export type ChatMessageKind = "chat" | "command" | "status" | "job-update";
@@ -33,6 +34,8 @@ export type MemoryEntryKind =
 	| "positive-signal";
 export type MemoryEntryScope = "session" | "user" | "workspace";
 export type MemoryCheckpointKind = "session-short-term" | "user-long-term";
+export type ProactiveTriggerType = "stalled-self-modify-approval" | "failed-generation-job";
+export type ProactiveOutboxStatus = "pending" | "sent" | "cancelled";
 
 export interface ChatSessionDocument {
 	_id?: ObjectId;
@@ -173,6 +176,28 @@ export interface OpenAiDebugInputDocument {
 	createdAt: Date;
 }
 
+export interface ProactiveOutboxDocument {
+	_id?: ObjectId;
+	pluginId: string;
+	dedupeKey: string;
+	triggerType: ProactiveTriggerType;
+	status: ProactiveOutboxStatus;
+	sessionKey?: string | null;
+	guildId: string;
+	channelId: string;
+	userId?: string | null;
+	relatedSessionId?: string | null;
+	relatedJobId?: string | null;
+	content: string;
+	reason?: string | null;
+	metadata?: Document;
+	dueAt: Date;
+	sentAt?: Date | null;
+	cancelledAt?: Date | null;
+	createdAt: Date;
+	updatedAt: Date;
+}
+
 export interface SmediaMongoCollections {
 	chatSessions: Collection<ChatSessionDocument>;
 	chatMessages: Collection<ChatMessageDocument>;
@@ -181,6 +206,7 @@ export interface SmediaMongoCollections {
 	generationJobs: Collection<GenerationJobDocument>;
 	contextDocuments: Collection<ContextDocument>;
 	openAiDebugInputs: Collection<OpenAiDebugInputDocument>;
+	proactiveOutbox: Collection<ProactiveOutboxDocument>;
 }
 
 export interface SmediaMongoDatabase {
@@ -214,6 +240,7 @@ export async function initializeMongoDatabase(env = process.env): Promise<Smedia
 		generationJobs: db.collection<GenerationJobDocument>(SMEDIA_COLLECTION_NAMES.generationJobs),
 		contextDocuments: db.collection<ContextDocument>(SMEDIA_COLLECTION_NAMES.contextDocuments),
 		openAiDebugInputs: db.collection<OpenAiDebugInputDocument>(SMEDIA_COLLECTION_NAMES.openAiDebugInputs),
+		proactiveOutbox: db.collection<ProactiveOutboxDocument>(SMEDIA_COLLECTION_NAMES.proactiveOutbox),
 	};
 
 	await ensureIndexes(collections);
@@ -873,6 +900,157 @@ export async function createOpenAiDebugInput(
 	};
 }
 
+export async function queueProactiveOutboxItem(
+	database: SmediaMongoDatabase,
+	input: {
+		pluginId: string;
+		dedupeKey: string;
+		triggerType: ProactiveTriggerType;
+		sessionKey?: string | null;
+		guildId: string;
+		channelId: string;
+		userId?: string | null;
+		relatedSessionId?: string | null;
+		relatedJobId?: string | null;
+		content: string;
+		reason?: string | null;
+		metadata?: Document;
+		dueAt: Date;
+		createdAt?: Date;
+	},
+): Promise<{ document: ProactiveOutboxDocument; created: boolean }> {
+	const dedupeKey = input.dedupeKey.trim();
+	const content = input.content.trim();
+	if (!dedupeKey) {
+		throw new Error("Proactive outbox item requires a dedupeKey.");
+	}
+	if (!content) {
+		throw new Error("Proactive outbox item requires content.");
+	}
+
+	const existing = await database.collections.proactiveOutbox.findOne({
+		pluginId: input.pluginId,
+		dedupeKey,
+	});
+	if (existing) {
+		return {
+			document: existing,
+			created: false,
+		};
+	}
+
+	const createdAt = input.createdAt ?? new Date();
+	const document: ProactiveOutboxDocument = {
+		pluginId: input.pluginId,
+		dedupeKey,
+		triggerType: input.triggerType,
+		status: "pending",
+		sessionKey: input.sessionKey ?? null,
+		guildId: input.guildId,
+		channelId: input.channelId,
+		userId: input.userId ?? null,
+		relatedSessionId: input.relatedSessionId ?? null,
+		relatedJobId: input.relatedJobId ?? null,
+		content,
+		reason: input.reason?.trim() ?? null,
+		metadata: input.metadata,
+		dueAt: input.dueAt,
+		sentAt: null,
+		cancelledAt: null,
+		createdAt,
+		updatedAt: createdAt,
+	};
+
+	try {
+		const result = await database.collections.proactiveOutbox.insertOne(document);
+		return {
+			document: {
+				...document,
+				_id: result.insertedId,
+			},
+			created: true,
+		};
+	} catch {
+		const persisted = await database.collections.proactiveOutbox.findOne({
+			pluginId: input.pluginId,
+			dedupeKey,
+		});
+		if (!persisted) {
+			throw new Error(`Failed to queue proactive outbox item for ${dedupeKey}.`);
+		}
+
+		return {
+			document: persisted,
+			created: false,
+		};
+	}
+}
+
+export async function listDueProactiveOutboxItems(
+	database: SmediaMongoDatabase,
+	input: {
+		pluginId: string;
+		now?: Date;
+		limit: number;
+	},
+): Promise<ProactiveOutboxDocument[]> {
+	const now = input.now ?? new Date();
+	return database.collections.proactiveOutbox
+		.find({
+			pluginId: input.pluginId,
+			status: "pending",
+			dueAt: { $lte: now },
+		})
+		.sort({ dueAt: 1, createdAt: 1 })
+		.limit(input.limit)
+		.toArray();
+}
+
+export async function markProactiveOutboxItemSent(
+	database: SmediaMongoDatabase,
+	input: {
+		id: ObjectId;
+		sentAt?: Date;
+		metadata?: Document;
+	},
+): Promise<void> {
+	const sentAt = input.sentAt ?? new Date();
+	const setDocument: Document = {
+		status: "sent",
+		sentAt,
+		updatedAt: sentAt,
+	};
+	if (input.metadata) {
+		setDocument.metadata = input.metadata;
+	}
+
+	await database.collections.proactiveOutbox.updateOne(
+		{ _id: input.id },
+		{ $set: setDocument },
+	);
+}
+
+export async function cancelProactiveOutboxItem(
+	database: SmediaMongoDatabase,
+	input: {
+		id: ObjectId;
+		reason?: string | null;
+	},
+): Promise<void> {
+	const cancelledAt = new Date();
+	await database.collections.proactiveOutbox.updateOne(
+		{ _id: input.id },
+		{
+			$set: {
+				status: "cancelled",
+				cancelledAt,
+				updatedAt: cancelledAt,
+				...(input.reason !== undefined ? { reason: input.reason?.trim() ?? null } : {}),
+			},
+		},
+	);
+}
+
 export async function listMemoryEntries(
 	database: SmediaMongoDatabase,
 	input: {
@@ -1131,6 +1309,10 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 		collections.openAiDebugInputs.dropIndex("source_createdAt"),
 		collections.openAiDebugInputs.dropIndex("sessionKey_createdAt"),
 		collections.openAiDebugInputs.dropIndex("createdAt_desc"),
+		collections.proactiveOutbox.dropIndex("plugin_dedupeKey_unique"),
+		collections.proactiveOutbox.dropIndex("plugin_status_dueAt"),
+		collections.proactiveOutbox.dropIndex("plugin_channel_status_createdAt"),
+		collections.proactiveOutbox.dropIndex("createdAt_ttl_30d"),
 	]);
 
 	await Promise.all([
@@ -1270,6 +1452,26 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 			{
 				key: { pluginId: 1, createdAt: -1 },
 				name: "plugin_createdAt_desc",
+			},
+			{
+				key: { createdAt: 1 },
+				name: "createdAt_ttl_30d",
+				expireAfterSeconds: DEFAULT_RETENTION_TTL_SECONDS,
+			},
+		]),
+		collections.proactiveOutbox.createIndexes([
+			{
+				key: { pluginId: 1, dedupeKey: 1 },
+				name: "plugin_dedupeKey_unique",
+				unique: true,
+			},
+			{
+				key: { pluginId: 1, status: 1, dueAt: 1 },
+				name: "plugin_status_dueAt",
+			},
+			{
+				key: { pluginId: 1, channelId: 1, status: 1, createdAt: -1 },
+				name: "plugin_channel_status_createdAt",
 			},
 			{
 				key: { createdAt: 1 },

@@ -10,6 +10,7 @@ import {
 import { loadCurrentPlugin, listAvailablePlugins } from "./plugin-loader";
 import { ensurePluginOutputDir, getMissingEnvVars, resolvePluginRootDir } from "./plugin-contract";
 import { generateChatReply } from "./chat-service";
+import { appendInlineNextStep } from "./chat-next-step-service";
 import { retrieveDbRouteEvidence } from "./chat-db-query-service";
 import { classifyChatRoute } from "./chat-router-service";
 import {
@@ -17,6 +18,8 @@ import {
 	buildChatSessionKey,
 	createOpenAiDebugInput,
 	initializeMongoDatabase,
+	listRecentChatMessages,
+	type ProactiveOutboxDocument,
 	type ChatMessageKind,
 	type SmediaMongoDatabase,
 } from "./db/mongo";
@@ -38,6 +41,7 @@ import {
 	triggerVeilRestart,
 	checkPostRestartSessions,
 } from "./self-modify-service";
+import { runProactiveDispatchCycle } from "./proactive-service";
 
 const currentPlugin = loadCurrentPlugin();
 const availablePlugins = listAvailablePlugins();
@@ -47,6 +51,7 @@ const MEMORY_INSPECT_COMMAND_PREFIX = "/memory";
 const DISCORD_MESSAGE_LIMIT = 2000;
 const CHAT_DEBOUNCE_MS = 1500;
 const MEMORY_CONSOLIDATION_INTERVAL_MS = 10 * 60 * 1000;
+const PROACTIVE_DISPATCH_INTERVAL_MS = 60 * 1000;
 
 const commandUserId = process.env.DISCORD_FELI_ID?.trim();
 if (!commandUserId) {
@@ -57,6 +62,7 @@ const allowedChannelIds = readAllowedChannelIds(process.env);
 let mongoDatabase: SmediaMongoDatabase | null = null;
 let shutdownPromise: Promise<void> | null = null;
 let memoryConsolidationTimer: NodeJS.Timeout | null = null;
+let proactiveDispatchTimer: NodeJS.Timeout | null = null;
 const chatDebounceTimers = new Map<string, { timer: NodeJS.Timeout; messages: Message[] }>();
 let memoryConsolidationPromise: Promise<{
 	processedSessionCount: number;
@@ -64,6 +70,13 @@ let memoryConsolidationPromise: Promise<{
 	updatedLongTermCount: number;
 	parsedChatMessageCount: number;
 	skippedSessionCount: number;
+} | null> | null = null;
+let proactiveDispatchPromise: Promise<{
+	evaluatedSessionCount: number;
+	scheduledCount: number;
+	dispatchedCount: number;
+	cancelledCount: number;
+	skippedCount: number;
 } | null> | null = null;
 
 const client = new Client({
@@ -351,7 +364,15 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 				outputDir,
 			});
 			if (customReply.trim().length > 0) {
-				await replyToMessage(database, lastMessage, customReply, interactionKind);
+				const recentAssistantReplies = await listRecentAssistantReplies(database, sessionKey);
+				const customReplyWithNextStep = await appendInlineNextStep({
+					reply: customReply,
+					userContent: combinedContent,
+					routeDecision,
+					routeEvidence,
+					recentAssistantReplies,
+				});
+				await replyToMessage(database, lastMessage, customReplyWithNextStep, interactionKind);
 			}
 			return;
 		}
@@ -375,10 +396,28 @@ async function flushDebouncedChat(database: SmediaMongoDatabase, messages: Messa
 			routeDecision,
 			routeEvidence,
 		});
+		const recentChatMessages = await listRecentChatMessages(database, {
+			pluginId: currentPlugin.id,
+			sessionKey,
+			limit: 8,
+			kinds: ["chat"],
+		});
+		const replyWithNextStep = await appendInlineNextStep({
+			reply,
+			userContent: combinedContent,
+			routeDecision,
+			routeEvidence,
+			recentAssistantReplies: recentChatMessages
+				.filter((entry) => entry.authorRole === "assistant")
+				.map((entry) => ({
+					content: entry.content,
+					createdAt: entry.createdAt,
+				})),
+		});
 		await replyToMessage(
 			database,
 			lastMessage,
-			reply,
+			replyWithNextStep,
 			"chat",
 		);
 	} catch (error: unknown) {
@@ -687,6 +726,7 @@ async function startBot(): Promise<void> {
 		if (mongoDatabase) {
 			await handlePostRestartSessions(mongoDatabase);
 		}
+		startProactiveDispatchLoop();
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		logError("Discord bot startup failed", { message });
@@ -718,8 +758,15 @@ async function shutdownBot(signal: NodeJS.Signals): Promise<void> {
 				clearInterval(memoryConsolidationTimer);
 				memoryConsolidationTimer = null;
 			}
+			if (proactiveDispatchTimer) {
+				clearInterval(proactiveDispatchTimer);
+				proactiveDispatchTimer = null;
+			}
 			if (memoryConsolidationPromise) {
 				await memoryConsolidationPromise;
+			}
+			if (proactiveDispatchPromise) {
+				await proactiveDispatchPromise;
 			}
 
 			if (mongoDatabase) {
@@ -751,8 +798,19 @@ function startMemoryConsolidationLoop(): void {
 	}, MEMORY_CONSOLIDATION_INTERVAL_MS);
 }
 
+function startProactiveDispatchLoop(): void {
+	void runScheduledProactiveDispatch();
+	proactiveDispatchTimer = setInterval(() => {
+		void runScheduledProactiveDispatch();
+	}, PROACTIVE_DISPATCH_INTERVAL_MS);
+}
+
 async function runScheduledMemoryConsolidation(): Promise<void> {
 	await executeMemoryConsolidationCycle();
+}
+
+async function runScheduledProactiveDispatch(): Promise<void> {
+	await executeProactiveDispatchCycle();
 }
 
 async function runManualMemoryConsolidation(): Promise<string> {
@@ -805,6 +863,35 @@ async function executeMemoryConsolidationCycle(): Promise<Awaited<
 		return await memoryConsolidationPromise;
 	} finally {
 		memoryConsolidationPromise = null;
+	}
+}
+
+async function executeProactiveDispatchCycle(): Promise<Awaited<
+	ReturnType<typeof runProactiveDispatchCycle>
+> | null> {
+	if (!mongoDatabase || proactiveDispatchPromise) {
+		return null;
+	}
+
+	proactiveDispatchPromise = (async () => {
+		try {
+			return await runProactiveDispatchCycle({
+				database: mongoDatabase as SmediaMongoDatabase,
+				pluginId: currentPlugin.id,
+				sendMessage: async (item: ProactiveOutboxDocument) => sendProactiveChannelMessage(mongoDatabase as SmediaMongoDatabase, item),
+			});
+		} catch (error: unknown) {
+			logWarn("Scheduled proactive dispatch failed", {
+				message: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	})();
+
+	try {
+		return await proactiveDispatchPromise;
+	} finally {
+		proactiveDispatchPromise = null;
 	}
 }
 
@@ -873,6 +960,53 @@ async function sendChannelMessage(
 	}
 }
 
+async function sendProactiveChannelMessage(
+	database: SmediaMongoDatabase,
+	item: ProactiveOutboxDocument,
+): Promise<boolean> {
+	try {
+		const channel = client.channels.cache.get(item.channelId) ?? await client.channels.fetch(item.channelId);
+		if (!channel || !("send" in channel)) {
+			throw new Error("Discord channel does not support proactive sends.");
+		}
+
+		const chunks = splitDiscordMessage(item.content);
+		for (const chunk of chunks) {
+			const sentMessage = await channel.send({
+				content: chunk,
+				allowedMentions: {
+					parse: [],
+				},
+			});
+
+			await persistOutboundChannelMessage(database, {
+				guildId: item.guildId,
+				channelId: item.channelId,
+				relatedUserId: item.userId ?? null,
+				sentMessage,
+				kind: "chat",
+				metadata: {
+					proactive: true,
+					triggerType: item.triggerType,
+					dedupeKey: item.dedupeKey,
+					relatedSessionId: item.relatedSessionId ?? null,
+					relatedJobId: item.relatedJobId ?? null,
+				},
+			});
+		}
+
+		return true;
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		logError("Failed to send proactive Discord channel message", {
+			channelId: item.channelId,
+			triggerType: item.triggerType,
+			message,
+		});
+		return false;
+	}
+}
+
 async function persistInboundDiscordMessage(
 	database: SmediaMongoDatabase,
 	message: Message,
@@ -930,6 +1064,25 @@ async function persistInboundChatContent(
 	});
 }
 
+async function listRecentAssistantReplies(
+	database: SmediaMongoDatabase,
+	sessionKey: string,
+): Promise<Array<{ content: string; createdAt: Date }>> {
+	const recentChatMessages = await listRecentChatMessages(database, {
+		pluginId: currentPlugin.id,
+		sessionKey,
+		limit: 8,
+		kinds: ["chat", "command"],
+	});
+
+	return recentChatMessages
+		.filter((entry) => entry.authorRole === "assistant")
+		.map((entry) => ({
+			content: entry.content,
+			createdAt: entry.createdAt,
+		}));
+}
+
 async function persistOutboundDiscordMessage(
 	database: SmediaMongoDatabase,
 	sourceMessage: Message,
@@ -937,25 +1090,46 @@ async function persistOutboundDiscordMessage(
 	kind: ChatMessageKind,
 	metadata?: Record<string, unknown>,
 ): Promise<void> {
+	await persistOutboundChannelMessage(database, {
+		guildId: sourceMessage.guildId as string,
+		channelId: sourceMessage.channelId,
+		relatedUserId: sourceMessage.author.id,
+		sentMessage,
+		kind,
+		metadata,
+	});
+}
+
+async function persistOutboundChannelMessage(
+	database: SmediaMongoDatabase,
+	input: {
+		guildId: string;
+		channelId: string;
+		relatedUserId?: string | null;
+		sentMessage: Message;
+		kind: ChatMessageKind;
+		metadata?: Record<string, unknown>;
+	},
+): Promise<void> {
 	await appendChatMessage(database, {
 		pluginId: currentPlugin.id,
 		sessionKey: buildChatSessionKey({
 			pluginId: currentPlugin.id,
-			guildId: sourceMessage.guildId as string,
-			channelId: sourceMessage.channelId,
+			guildId: input.guildId,
+			channelId: input.channelId,
 		}),
-		guildId: sourceMessage.guildId as string,
-		channelId: sourceMessage.channelId,
+		guildId: input.guildId,
+		channelId: input.channelId,
 		userId: client.user?.id ?? null,
-		discordMessageId: sentMessage.id,
+		discordMessageId: input.sentMessage.id,
 		authorRole: "assistant",
-		kind,
-		content: sentMessage.content,
+		kind: input.kind,
+		content: input.sentMessage.content,
 		metadata: {
-			relatedUserId: sourceMessage.author.id,
-			...metadata,
+			relatedUserId: input.relatedUserId ?? null,
+			...input.metadata,
 		},
-		createdAt: sentMessage.createdAt,
+		createdAt: input.sentMessage.createdAt,
 	});
 }
 
@@ -971,6 +1145,7 @@ async function formatBotStatus(database: SmediaMongoDatabase, channelId: string)
 		`outputDir=${currentPlugin.outputDir}`,
 		`pluginEnv=${missingPluginEnv.length === 0 ? "ready" : `missing:${missingPluginEnv.join(",")}`}`,
 		`memoryConsolidation=${memoryConsolidationPromise ? "running" : "idle"}`,
+		`proactiveDispatch=${proactiveDispatchPromise ? "running" : "idle"}`,
 		`enabledPlugins=${availablePlugins.map((plugin) => plugin.id).join(",")}`,
 		`pluginCommands=${currentPlugin.commands.map((command) => `/${command.name}`).join(",")}`,
 	];
