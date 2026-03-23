@@ -20,7 +20,9 @@ interface MigrationTarget<T extends Document> {
 async function main(): Promise<void> {
 	loadRuntimeEnv();
 	const options = parseOptions(process.argv.slice(2));
-	const database = await initializeMongoDatabase();
+	const database = await initializeMongoDatabase(process.env, {
+		repairLegacyPluginNamespace: false,
+	});
 
 	try {
 		const selfModifyCollection = database.db.collection<SelfModifySessionDocument>(SELF_MODIFY_COLLECTION_NAME);

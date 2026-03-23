@@ -5,6 +5,7 @@ import {
 	type Document,
 	type ObjectId,
 } from "mongodb";
+import { readActivePluginId } from "../runtime-env";
 
 const DEFAULT_SERVER_SELECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_DATABASE_NAME = "social-media-script";
@@ -222,7 +223,14 @@ export interface MongoConfig {
 	connectionSource: "MONGODB_URI" | "mongo_db_*";
 }
 
-export async function initializeMongoDatabase(env = process.env): Promise<SmediaMongoDatabase> {
+interface MongoInitializationOptions {
+	repairLegacyPluginNamespace?: boolean;
+}
+
+export async function initializeMongoDatabase(
+	env = process.env,
+	options: MongoInitializationOptions = {},
+): Promise<SmediaMongoDatabase> {
 	const config = readMongoConfig(env);
 	const client = new MongoClient(config.uri, {
 		appName: "social-media-script",
@@ -241,6 +249,10 @@ export async function initializeMongoDatabase(env = process.env): Promise<Smedia
 		openAiDebugInputs: db.collection<OpenAiDebugInputDocument>(SMEDIA_COLLECTION_NAMES.openAiDebugInputs),
 		proactiveOutbox: db.collection<ProactiveOutboxDocument>(SMEDIA_COLLECTION_NAMES.proactiveOutbox),
 	};
+
+	if (options.repairLegacyPluginNamespace ?? true) {
+		await repairLegacyPluginNamespace(collections, readActivePluginId(env));
+	}
 
 	await ensureIndexes(collections);
 
@@ -261,6 +273,183 @@ export function buildChatSessionKey(input: {
 	channelId: string;
 }): string {
 	return `${input.pluginId}:${input.guildId}:${input.channelId}`;
+}
+
+interface LegacyMigrationTarget {
+	collection: Collection<Document>;
+	hasSessionKey: boolean;
+}
+
+interface DuplicateCandidate {
+	_id: ObjectId;
+	updatedAt?: Date | null;
+	createdAt?: Date | null;
+}
+
+async function repairLegacyPluginNamespace(
+	collections: SmediaMongoCollections,
+	pluginId: string,
+): Promise<void> {
+	const targets: LegacyMigrationTarget[] = [
+		{
+			collection: collections.chatSessions as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+		{
+			collection: collections.chatMessages as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+		{
+			collection: collections.memoryEntries as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+		{
+			collection: collections.memoryCheckpoints as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+		{
+			collection: collections.generationJobs as unknown as Collection<Document>,
+			hasSessionKey: false,
+		},
+		{
+			collection: collections.openAiDebugInputs as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+		{
+			collection: collections.proactiveOutbox as unknown as Collection<Document>,
+			hasSessionKey: true,
+		},
+	];
+
+	await Promise.all(
+		targets.map(async (target) => {
+			await target.collection.updateMany(buildMissingPluginIdFilter(), {
+				$set: { pluginId },
+			});
+
+			if (!target.hasSessionKey) {
+				return;
+			}
+
+			await target.collection.updateMany(buildLegacySessionKeyFilter(pluginId), [
+				{
+					$set: {
+						sessionKey: {
+							$concat: [pluginId, ":", "$sessionKey"],
+						},
+					},
+				},
+			]);
+		}),
+	);
+
+	await Promise.all([
+		pruneDuplicateDocuments(
+			collections.memoryEntries as unknown as Collection<Document>,
+			{ pluginId, sessionKey: { $type: "string" } },
+			{ pluginId: "$pluginId", kind: "$kind", scope: "$scope", sessionKey: "$sessionKey" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryEntries as unknown as Collection<Document>,
+			{ pluginId, userId: { $type: "string" } },
+			{ pluginId: "$pluginId", kind: "$kind", scope: "$scope", userId: "$userId" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryCheckpoints as unknown as Collection<Document>,
+			{ pluginId, sessionKey: { $type: "string" } },
+			{ pluginId: "$pluginId", kind: "$kind", sessionKey: "$sessionKey" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryCheckpoints as unknown as Collection<Document>,
+			{ pluginId, userId: { $type: "string" } },
+			{ pluginId: "$pluginId", kind: "$kind", userId: "$userId" },
+		),
+	]);
+}
+
+function buildMissingPluginIdFilter(): Document {
+	return {
+		$or: [
+			{ pluginId: { $exists: false } },
+			{ pluginId: null },
+			{ pluginId: "" },
+		],
+	};
+}
+
+function buildLegacySessionKeyFilter(pluginId: string): Document {
+	return {
+		pluginId,
+		sessionKey: {
+			$type: "string",
+			$regex: /^[^:]+:[^:]+$/,
+			$not: new RegExp(`^${escapeRegex(pluginId)}:`),
+		},
+	};
+}
+
+async function pruneDuplicateDocuments(
+	collection: Collection<Document>,
+	match: Document,
+	groupId: Document,
+): Promise<number> {
+	const duplicateGroups = await collection
+		.aggregate<{
+			documents: DuplicateCandidate[];
+			count: number;
+		}>([
+			{ $match: match },
+			{
+				$group: {
+					_id: groupId,
+					documents: {
+						$push: {
+							_id: "$_id",
+							updatedAt: "$updatedAt",
+							createdAt: "$createdAt",
+						},
+					},
+					count: { $sum: 1 },
+				},
+			},
+			{ $match: { count: { $gt: 1 } } },
+		])
+		.toArray();
+
+	const idsToDelete = duplicateGroups.flatMap((group) => {
+		const ranked = [...group.documents].sort(compareDuplicateCandidates);
+		return ranked.slice(1).map((document) => document._id);
+	});
+
+	if (idsToDelete.length === 0) {
+		return 0;
+	}
+
+	await collection.deleteMany({
+		_id: {
+			$in: idsToDelete,
+		},
+	});
+
+	return idsToDelete.length;
+}
+
+function compareDuplicateCandidates(left: DuplicateCandidate, right: DuplicateCandidate): number {
+	const updatedAtDelta = toEpochMillis(right.updatedAt) - toEpochMillis(left.updatedAt);
+	if (updatedAtDelta !== 0) {
+		return updatedAtDelta;
+	}
+
+	const createdAtDelta = toEpochMillis(right.createdAt) - toEpochMillis(left.createdAt);
+	if (createdAtDelta !== 0) {
+		return createdAtDelta;
+	}
+
+	return right._id.toHexString().localeCompare(left._id.toHexString());
+}
+
+function toEpochMillis(value?: Date | null): number {
+	return value instanceof Date ? value.getTime() : 0;
 }
 
 export async function appendChatMessage(

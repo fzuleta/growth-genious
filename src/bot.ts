@@ -87,7 +87,7 @@ const client = new Client({
 	],
 });
 
-client.once("ready", () => {
+client.once("clientReady", () => {
 	logInfo("Discord workspace assistant connected", {
 		pluginId: currentPlugin.id,
 		assistantName: currentPlugin.name,
