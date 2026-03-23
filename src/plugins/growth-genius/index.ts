@@ -25,7 +25,7 @@ export const growthGeniusPlugin: PluginContract = {
 			commandName: "analytics",
 			routeName: "analytics-natural-language",
 			subject: intent.subject,
-			confidence: intent.reason.includes("-high") ? "high" : "medium",
+			confidence: intent.confidence === "high" ? "high" : "medium",
 			requestedSources: ["google-analytics"],
 			reason: intent.reason,
 			handle: async (handlerInput) => {
@@ -33,6 +33,7 @@ export const growthGeniusPlugin: PluginContract = {
 					args: intent.args,
 					requestSource: "analytics-natural-language",
 					originalPrompt: input.content,
+					nlIntent: intent,
 				});
 
 				return formatAnalyticsCommandResult({

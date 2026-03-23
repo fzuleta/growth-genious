@@ -13,6 +13,7 @@ export interface PluginRouteRequest {
 export interface PluginCommandResult {
 	reply: string;
 	outputFiles?: string[];
+	diagnostics?: string[];
 }
 
 export interface PluginCommandContext {

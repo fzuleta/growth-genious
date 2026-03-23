@@ -119,6 +119,10 @@ export interface AnalyticsNaturalLanguageIntent {
 	args: string;
 	subject: string;
 	reason: string;
+	confidence?: "low" | "medium" | "high";
+	matchedBy?: "model" | "heuristic";
+	preset?: string;
+	dateArgs?: string | null;
 }
 
 interface AdminResourceConfig {
@@ -388,6 +392,7 @@ export async function executeAnalyticsInvocation(
 		args: string;
 		requestSource: string;
 		originalPrompt?: string;
+		nlIntent?: AnalyticsNaturalLanguageIntent;
 	},
 ): Promise<PluginCommandResult> {
 	const analyticsOutputDir = path.join(input.outputDir, "analytics");
@@ -430,6 +435,17 @@ export async function executeAnalyticsInvocation(
 				},
 				args: options.args,
 				originalPrompt: options.originalPrompt ?? null,
+				nlInterpretation: options.nlIntent
+					? {
+						matchedBy: options.nlIntent.matchedBy ?? null,
+						confidence: options.nlIntent.confidence ?? null,
+						subject: options.nlIntent.subject,
+						preset: options.nlIntent.preset ?? null,
+						dateArgs: options.nlIntent.dateArgs ?? null,
+						args: options.nlIntent.args,
+						reason: options.nlIntent.reason,
+					}
+					: null,
 				pluginRootDir: input.plugin.rootDir,
 				outputDir: input.plugin.outputDir,
 				propertyId,
@@ -454,9 +470,19 @@ export async function executeAnalyticsInvocation(
 		outputFiles.splice(2, 0, path.relative(process.cwd(), legacyReportArtifactPath));
 	}
 
+	const reply = options.originalPrompt?.trim() && options.requestSource === "analytics-natural-language"
+		? await generateNaturalLanguageAnalyticsReply({
+			originalPrompt: options.originalPrompt,
+			analyticsArgs: options.args,
+			summaryMarkdown: execution.summaryMarkdown,
+			fallbackReply: execution.reply,
+		  })
+		: execution.reply;
+
 	return {
-		reply: execution.reply,
+		reply,
 		outputFiles,
+		diagnostics: options.nlIntent ? buildAnalyticsInterpretationDiagnostics(options.nlIntent) : undefined,
 	};
 }
 
@@ -471,12 +497,14 @@ export function formatAnalyticsCommandResult(input: {
 	}
 
 	const outputFiles = input.result.outputFiles?.filter((value) => value.trim().length > 0) ?? [];
-	if (outputFiles.length === 0) {
+	const diagnostics = input.result.diagnostics?.filter((value) => value.trim().length > 0) ?? [];
+	if (outputFiles.length === 0 && diagnostics.length === 0) {
 		return input.result.reply;
 	}
 
 	return [
 		input.result.reply,
+		...diagnostics,
 		`command=/${input.commandName}`,
 		`plugin=${input.pluginId}`,
 		`outputDir=${path.relative(process.cwd(), input.outputDir) || input.outputDir}`,
@@ -502,6 +530,10 @@ export function matchNaturalLanguageAnalyticsRequest(content: string): Analytics
 		args,
 		subject: `analytics-${preset}`,
 		reason: "analytics-natural-language-match",
+		confidence: "medium",
+		matchedBy: "heuristic",
+		preset,
+		dateArgs: dateRange,
 	};
 }
 
@@ -2166,7 +2198,8 @@ function inferAnalyticsDateRangeArgs(content: string): string | null {
 	return "7d";
 }
 
-const NL_ANALYTICS_MODEL = process.env.OPENAI_NL_ANALYTICS_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-4.1-mini";
+const NL_ANALYTICS_MODEL = process.env.OPENAI_NL_ANALYTICS_MODEL?.trim() || process.env.OPENAI_ROUTER_MODEL?.trim() || "gpt-5.4-mini";
+const NL_ANALYTICS_REPLY_MODEL = process.env.OPENAI_NL_ANALYTICS_REPLY_MODEL?.trim() || process.env.OPENAI_ANALYTICS_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-5.4-mini";
 
 const NL_ANALYTICS_AVAILABLE_PRESETS = Object.keys(PRESET_REPORT_CONFIG);
 
@@ -2205,6 +2238,13 @@ const NL_ANALYTICS_SYSTEM_PROMPT = [
 	"  - 'last month' or 'past month' → '30d'.",
 	"  - 'last N days' → '<N>d'.",
 	"  - If no time reference, return null (defaults to 7d).",
+	"",
+	"Examples:",
+	"  - 'how did we do yesterday' -> {\"isAnalytics\": true, \"preset\": \"overview\", \"dateArgs\": \"YYYY-MM-DD YYYY-MM-DD\", \"subject\": \"analytics-overview\", \"confidence\": \"high\"}",
+	"  - 'what were our top pages last 30 days' -> {\"isAnalytics\": true, \"preset\": \"pages\", \"dateArgs\": \"30d\", \"subject\": \"analytics-pages\", \"confidence\": \"high\"}",
+	"  - 'which sources are driving traffic this month' -> {\"isAnalytics\": true, \"preset\": \"sources\", \"dateArgs\": \"30d\", \"subject\": \"analytics-sources\", \"confidence\": \"high\"}",
+	"  - 'show live users right now' -> {\"isAnalytics\": true, \"preset\": \"realtime\", \"dateArgs\": null, \"subject\": \"analytics-realtime\", \"confidence\": \"high\"}",
+	"  - 'what countries are users coming from' -> {\"isAnalytics\": true, \"preset\": \"geo\", \"dateArgs\": null, \"subject\": \"analytics-geo\", \"confidence\": \"medium\"}",
 	"",
 	"If the message is NOT about analytics, return: {\"isAnalytics\": false, \"preset\": null, \"dateArgs\": null, \"subject\": null, \"confidence\": \"high\"}",
 ].join("\n");
@@ -2251,9 +2291,76 @@ async function translateNaturalLanguageAnalyticsIntent(content: string): Promise
 			args,
 			subject: parsed.subject ?? `analytics-${parsed.preset}`,
 			reason: `analytics-nl-model-${parsed.confidence}`,
+			confidence: parsed.confidence,
+			matchedBy: "model",
+			preset: parsed.preset,
+			dateArgs: parsed.dateArgs,
 		};
 	} catch {
 		return null;
+	}
+}
+
+function buildAnalyticsInterpretationDiagnostics(intent: AnalyticsNaturalLanguageIntent): string[] {
+	return [
+		`nlMatchedBy=${intent.matchedBy ?? "unknown"}`,
+		`nlConfidence=${intent.confidence ?? "unknown"}`,
+		`nlSubject=${intent.subject}`,
+		`nlPreset=${intent.preset ?? "unknown"}`,
+		`nlDateArgs=${intent.dateArgs ?? "default"}`,
+		`nlArgs=${intent.args}`,
+	];
+}
+
+async function generateNaturalLanguageAnalyticsReply(input: {
+	originalPrompt: string;
+	analyticsArgs: string;
+	summaryMarkdown: string;
+	fallbackReply: string;
+}): Promise<string> {
+	try {
+		const client = createOpenAIClient();
+		const response = await client.responses.create({
+			model: NL_ANALYTICS_REPLY_MODEL,
+			input: [
+				{
+					role: "system",
+					content: [
+						{
+							type: "input_text",
+							text: [
+								"You answer a user's analytics question using the provided GA4 summary.",
+								"Answer the user's actual question directly, not the command that was run.",
+								"Use concrete numbers from the summary when available.",
+								"If the data only partially answers the question, say that briefly and explain what the current result does show.",
+								"Keep the answer concise, specific, and useful for Discord.",
+								"Do not mention internal prompts, models, routing, or implementation details.",
+								"Do not invent metrics that are not present in the summary.",
+								"Stay under 1200 characters.",
+							].join(" "),
+						},
+					],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "input_text",
+							text: JSON.stringify({
+								userQuestion: input.originalPrompt,
+								resolvedAnalyticsArgs: input.analyticsArgs,
+								analyticsSummary: input.summaryMarkdown,
+							}),
+						},
+					],
+				},
+			],
+		});
+
+		const text = response.output_text.trim();
+		return text || input.fallbackReply;
+	} catch {
+		return input.fallbackReply;
 	}
 }
 
