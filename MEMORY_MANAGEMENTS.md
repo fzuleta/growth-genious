@@ -5,8 +5,9 @@
 - The current memory system is a practical three-layer design: raw chat history in MongoDB, per-session short-term summaries, and per-user long-term profiles.
 - It is incremental, checkpoint-driven, plugin-scoped, and reasonably token-conscious. That is a solid foundation.
 - The two highest-risk memory-boundary issues have now been fixed in code: main chat recall is restricted to same-user past session summaries, and long-term profile refresh only includes assistant messages explicitly linked to the target user.
+- The supported memory surface is now intentionally narrow: the runtime only manages `short-term-summary` and `long-term-profile` memory entries.
 - The system is more of a compact summarization pipeline than a full memory platform. It has no semantic retrieval, no versioned memory history, no confidence model, and limited observability.
-- If memory quality is important, the first upgrades should be: tighten retrieval scope, fix long-term source selection, and introduce stronger memory entry typing plus better inspection tooling.
+- If memory quality is important, the next upgrades should be: improve observability, add stronger provenance, and decide whether to evolve from compact summaries into richer memory records.
 
 ## Overall Assessment
 
@@ -76,7 +77,7 @@ When generating a chat reply in `src/chat-service.ts`, the prompt is assembled f
 - Route/evidence context when applicable
 - Latest short-term summary
 - Unsummarized recent messages since the last short-term summary
-- Keyword-recalled memory entries
+- Keyword-recalled past session summaries for the same user
 - Recent raw chat history
 
 This layering is good. It reduces prompt bloat and keeps durable information separate from immediate context.
@@ -196,17 +197,7 @@ Tradeoffs:
 
 If you later want memory debugging or regression testing, this will become a limitation.
 
-### 5. `chatSessions.memoryEntryIds` is drifting from reality
-
-`createMemoryEntry` updates `chatSessions.memoryEntryIds`, but the active memory path uses `upsertMemoryEntry`.
-
-As a result:
-
-- the session document does not appear to stay linked to the memory entries that are actually being maintained through the automatic pipeline.
-
-Today this is mostly a design smell because the field does not seem to be actively used elsewhere. But it is still a sign that the data model and the runtime behavior are not fully aligned.
-
-### 6. Inspection is shallow
+### 5. Inspection is shallow
 
 `/memory` currently exposes only:
 
@@ -223,7 +214,7 @@ It does not expose:
 
 That makes it harder to debug memory quality in production.
 
-### 7. Retention policy is inconsistent by design
+### 6. Retention policy is inconsistent by design
 
 Current retention behavior:
 
@@ -235,19 +226,17 @@ Current retention behavior:
 
 This can be reasonable, but it means long-term profiles can outlive the raw evidence used to build them. That may be intentional, but it should be considered explicitly rather than implicitly accepted.
 
-### 8. Long-term keyword recall is inconsistently scoped across code paths
+### 7. Retrieval is still intentionally simple
 
-There is an asymmetry:
+The retrieval model is now safer, but it is still deliberately basic:
 
-- In the main chat path, keyword recall is too broad and can pull other users' long-term profiles.
-- In the DB-query path, `searchMemoryEntries` is called with `userId`, but that filter uses `metadata.participantUserIds`.
+- The main chat path uses regex keyword recall over same-user past session summaries.
+- The current user's long-term profile is injected directly from the memory snapshot rather than through keyword search.
+- The DB-query path still mixes direct memory snapshot loading with regex-based search.
 
-Since long-term profiles do not store `participantUserIds`, that filter effectively favors session summaries and may exclude long-term profiles from keyword search.
+That is much safer than the earlier behavior, but it still means recall quality depends on wording overlap and recency rather than semantic relevance.
 
-So the system is currently inconsistent in opposite ways:
-
-- one path is too open
-- one path is too narrow
+This is now more of a capability limitation than a boundary bug.
 
 ## Design Intent Versus Actual Behavior
 
@@ -260,38 +249,14 @@ The intended model appears to be:
 The current actual behavior is closer to this:
 
 - Session memory mostly works as intended.
-- Long-term memory is structurally right but has source contamination risk.
-- Recall works, but the scoping rules are not strict enough to trust it fully.
+- Long-term memory is structurally right and now uses user-linked source evidence.
+- Recall is much safer than before, but still shallow because it is regex-based and summary-oriented.
 
-That means the system is already useful, but not yet trustworthy enough to be treated as high-integrity memory.
+That means the system is now trustworthy enough for bounded recap/profile use, but not yet rich enough to be treated as a high-fidelity memory platform.
 
 ## Recommended Priorities
 
-### Priority 1: Fix retrieval scope in the main chat path
-
-Change keyword recall so it cannot pull unrelated users' memory by default.
-
-Reasonable options:
-
-- Restrict recall to the current session's short-term summary plus the current user's long-term profile.
-- Or split recall into two explicit searches: session-scoped recap search and current-user long-term search.
-- Only allow broader cross-session recall if you intentionally opt into it.
-
-This is the highest-value fix.
-
-### Priority 2: Fix long-term profile source selection
-
-The long-term profile builder should not consume arbitrary assistant messages across the entire plugin.
-
-Better source rules would be:
-
-- only user messages by the target user
-- plus assistant replies from sessions where that user participated
-- or assistant replies whose metadata clearly maps them to that user/session
-
-Without this change, long-term memory can be directionally wrong.
-
-### Priority 3: Improve observability
+### Priority 1: Improve observability
 
 Extend `/memory` or add a deeper inspect mode that shows:
 
@@ -304,7 +269,7 @@ Extend `/memory` or add a deeper inspect mode that shows:
 
 If memory is important, this tooling will pay for itself quickly.
 
-### Priority 4: Introduce memory entry provenance and evaluation hooks
+### Priority 2: Introduce memory entry provenance and evaluation hooks
 
 Add metadata that makes memory easier to trust and debug:
 
@@ -316,7 +281,7 @@ Add metadata that makes memory easier to trust and debug:
 
 The current keyword coverage metric is a useful start, but it is not sufficient as a quality signal.
 
-### Priority 5: Decide whether you want a summary system or a memory system
+### Priority 3: Decide whether you want a summary system or a memory system
 
 Right now the implementation is primarily a summary system.
 
@@ -365,8 +330,6 @@ What is already good:
 
 What prevents it from being fully reliable:
 
-- recall scoping is too loose in the main chat path
-- long-term source selection is too broad
 - retrieval is regex-only
 - debugging and provenance are still thin
 
