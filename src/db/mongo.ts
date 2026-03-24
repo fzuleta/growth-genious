@@ -5,7 +5,6 @@ import {
 	type Document,
 	type ObjectId,
 } from "mongodb";
-import { readActivePluginId } from "../runtime-env";
 
 const DEFAULT_SERVER_SELECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_DATABASE_NAME = "social-media-script";
@@ -25,13 +24,8 @@ export const SMEDIA_COLLECTION_NAMES = {
 export type ChatMessageKind = "chat" | "command" | "status" | "job-update";
 export type ChatAuthorRole = "user" | "assistant" | "system";
 export type MemoryEntryKind =
-	| "manual-note"
-	| "session-summary"
-	| "user-preference"
-	| "brand-context"
 	| "short-term-summary"
-	| "long-term-profile"
-	| "positive-signal";
+	| "long-term-profile";
 export type MemoryEntryScope = "session" | "user" | "workspace";
 export type MemoryCheckpointKind = "session-short-term" | "user-long-term";
 export type ProactiveTriggerType = "stalled-self-modify-approval" | "failed-generation-job";
@@ -47,7 +41,6 @@ export interface ChatSessionDocument {
 	title?: string | null;
 	summary?: string | null;
 	messageCount: number;
-	memoryEntryIds: ObjectId[];
 	createdAt: Date;
 	updatedAt: Date;
 	lastMessageAt: Date;
@@ -83,7 +76,6 @@ export interface MemoryEntryDocument {
 	content: string;
 	tags: string[];
 	metadata?: Document;
-	sourceSessionId?: ObjectId | null;
 	createdAt: Date;
 	updatedAt: Date;
 }
@@ -223,13 +215,8 @@ export interface MongoConfig {
 	connectionSource: "MONGODB_URI" | "mongo_db_*";
 }
 
-interface MongoInitializationOptions {
-	repairLegacyPluginNamespace?: boolean;
-}
-
 export async function initializeMongoDatabase(
 	env = process.env,
-	options: MongoInitializationOptions = {},
 ): Promise<SmediaMongoDatabase> {
 	const config = readMongoConfig(env);
 	const client = new MongoClient(config.uri, {
@@ -250,10 +237,6 @@ export async function initializeMongoDatabase(
 		proactiveOutbox: db.collection<ProactiveOutboxDocument>(SMEDIA_COLLECTION_NAMES.proactiveOutbox),
 	};
 
-	if (options.repairLegacyPluginNamespace ?? true) {
-		await repairLegacyPluginNamespace(collections, readActivePluginId(env));
-	}
-
 	await ensureIndexes(collections);
 
 	return {
@@ -273,272 +256,6 @@ export function buildChatSessionKey(input: {
 	channelId: string;
 }): string {
 	return `${input.pluginId}:${input.guildId}:${input.channelId}`;
-}
-
-interface LegacyMigrationTarget {
-	collection: Collection<Document>;
-	hasSessionKey: boolean;
-}
-
-interface DuplicateCandidate {
-	_id: ObjectId;
-	updatedAt?: Date | null;
-	createdAt?: Date | null;
-}
-
-async function repairLegacyPluginNamespace(
-	collections: SmediaMongoCollections,
-	pluginId: string,
-): Promise<void> {
-	const targets: LegacyMigrationTarget[] = [
-		{
-			collection: collections.chatSessions as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-		{
-			collection: collections.chatMessages as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-		{
-			collection: collections.memoryEntries as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-		{
-			collection: collections.memoryCheckpoints as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-		{
-			collection: collections.generationJobs as unknown as Collection<Document>,
-			hasSessionKey: false,
-		},
-		{
-			collection: collections.openAiDebugInputs as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-		{
-			collection: collections.proactiveOutbox as unknown as Collection<Document>,
-			hasSessionKey: true,
-		},
-	];
-
-	// Step 1: Delete null-pluginId docs that already have a migrated counterpart.
-	// Without this, the updateMany in step 2 silently skips docs that would violate
-	// an existing unique index, leaving orphaned null-pluginId duplicates.
-	await Promise.all([
-		deleteNullPluginIdConflicts(
-			collections.memoryEntries as unknown as Collection<Document>,
-			pluginId,
-			[
-				{ sessionKey: { $type: "string" } },
-				{ userId: { $type: "string" } },
-			],
-		),
-		deleteNullPluginIdConflicts(
-			collections.memoryCheckpoints as unknown as Collection<Document>,
-			pluginId,
-			[
-				{ sessionKey: { $type: "string" } },
-				{ userId: { $type: "string" } },
-			],
-		),
-	]);
-
-	// Step 2: Prune null-pluginId duplicates among themselves before migration.
-	await Promise.all([
-		pruneDuplicateDocuments(
-			collections.memoryEntries as unknown as Collection<Document>,
-			{ ...buildMissingPluginIdFilter(), sessionKey: { $type: "string" } },
-			{ kind: "$kind", scope: "$scope", sessionKey: "$sessionKey" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryEntries as unknown as Collection<Document>,
-			{ ...buildMissingPluginIdFilter(), userId: { $type: "string" } },
-			{ kind: "$kind", scope: "$scope", userId: "$userId" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryCheckpoints as unknown as Collection<Document>,
-			{ ...buildMissingPluginIdFilter(), sessionKey: { $type: "string" } },
-			{ kind: "$kind", sessionKey: "$sessionKey" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryCheckpoints as unknown as Collection<Document>,
-			{ ...buildMissingPluginIdFilter(), userId: { $type: "string" } },
-			{ kind: "$kind", userId: "$userId" },
-		),
-	]);
-
-	// Step 3: Set pluginId on remaining orphan docs and rewrite legacy session keys.
-	await Promise.all(
-		targets.map(async (target) => {
-			await target.collection.updateMany(buildMissingPluginIdFilter(), {
-				$set: { pluginId },
-			});
-
-			if (!target.hasSessionKey) {
-				return;
-			}
-
-			await target.collection.updateMany(buildLegacySessionKeyFilter(pluginId), [
-				{
-					$set: {
-						sessionKey: {
-							$concat: [pluginId, ":", "$sessionKey"],
-						},
-					},
-				},
-			]);
-		}),
-	);
-
-	// Step 4: Prune post-migration duplicates (same as before).
-	await Promise.all([
-		pruneDuplicateDocuments(
-			collections.memoryEntries as unknown as Collection<Document>,
-			{ pluginId, sessionKey: { $type: "string" } },
-			{ pluginId: "$pluginId", kind: "$kind", scope: "$scope", sessionKey: "$sessionKey" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryEntries as unknown as Collection<Document>,
-			{ pluginId, userId: { $type: "string" } },
-			{ pluginId: "$pluginId", kind: "$kind", scope: "$scope", userId: "$userId" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryCheckpoints as unknown as Collection<Document>,
-			{ pluginId, sessionKey: { $type: "string" } },
-			{ pluginId: "$pluginId", kind: "$kind", sessionKey: "$sessionKey" },
-		),
-		pruneDuplicateDocuments(
-			collections.memoryCheckpoints as unknown as Collection<Document>,
-			{ pluginId, userId: { $type: "string" } },
-			{ pluginId: "$pluginId", kind: "$kind", userId: "$userId" },
-		),
-	]);
-}
-
-function buildMissingPluginIdFilter(): Document {
-	return {
-		$or: [
-			{ pluginId: { $exists: false } },
-			{ pluginId: null },
-			{ pluginId: "" },
-		],
-	};
-}
-
-function buildLegacySessionKeyFilter(pluginId: string): Document {
-	return {
-		pluginId,
-		sessionKey: {
-			$type: "string",
-			$regex: /^[^:]+:[^:]+$/,
-			$not: new RegExp(`^${escapeRegex(pluginId)}:`),
-		},
-	};
-}
-
-async function pruneDuplicateDocuments(
-	collection: Collection<Document>,
-	match: Document,
-	groupId: Document,
-): Promise<number> {
-	const duplicateGroups = await collection
-		.aggregate<{
-			documents: DuplicateCandidate[];
-			count: number;
-		}>([
-			{ $match: match },
-			{
-				$group: {
-					_id: groupId,
-					documents: {
-						$push: {
-							_id: "$_id",
-							updatedAt: "$updatedAt",
-							createdAt: "$createdAt",
-						},
-					},
-					count: { $sum: 1 },
-				},
-			},
-			{ $match: { count: { $gt: 1 } } },
-		])
-		.toArray();
-
-	const idsToDelete = duplicateGroups.flatMap((group) => {
-		const ranked = [...group.documents].sort(compareDuplicateCandidates);
-		return ranked.slice(1).map((document) => document._id);
-	});
-
-	if (idsToDelete.length === 0) {
-		return 0;
-	}
-
-	await collection.deleteMany({
-		_id: {
-			$in: idsToDelete,
-		},
-	});
-
-	return idsToDelete.length;
-}
-
-function compareDuplicateCandidates(left: DuplicateCandidate, right: DuplicateCandidate): number {
-	const updatedAtDelta = toEpochMillis(right.updatedAt) - toEpochMillis(left.updatedAt);
-	if (updatedAtDelta !== 0) {
-		return updatedAtDelta;
-	}
-
-	const createdAtDelta = toEpochMillis(right.createdAt) - toEpochMillis(left.createdAt);
-	if (createdAtDelta !== 0) {
-		return createdAtDelta;
-	}
-
-	return right._id.toHexString().localeCompare(left._id.toHexString());
-}
-
-function toEpochMillis(value?: Date | null): number {
-	return value instanceof Date ? value.getTime() : 0;
-}
-
-async function deleteNullPluginIdConflicts(
-	collection: Collection<Document>,
-	targetPluginId: string,
-	scopeFilters: Document[],
-): Promise<number> {
-	const nullFilter = buildMissingPluginIdFilter();
-	let totalDeleted = 0;
-
-	for (const scopeFilter of scopeFilters) {
-		const nullDocs = await collection
-			.find({ ...nullFilter, ...scopeFilter }, { projection: { _id: 1, kind: 1, scope: 1, sessionKey: 1, userId: 1 } })
-			.toArray();
-
-		const idsToDelete: ObjectId[] = [];
-		for (const doc of nullDocs) {
-			const migratedFilter: Document = { pluginId: targetPluginId, kind: doc.kind };
-			if (doc.scope !== undefined) {
-				migratedFilter.scope = doc.scope;
-			}
-			if (typeof doc.sessionKey === "string") {
-				migratedFilter.sessionKey = doc.sessionKey;
-			}
-			if (typeof doc.userId === "string") {
-				migratedFilter.userId = doc.userId;
-			}
-
-			const exists = await collection.findOne(migratedFilter, { projection: { _id: 1 } });
-			if (exists) {
-				idsToDelete.push(doc._id as ObjectId);
-			}
-		}
-
-		if (idsToDelete.length > 0) {
-			await collection.deleteMany({ _id: { $in: idsToDelete } });
-			totalDeleted += idsToDelete.length;
-		}
-	}
-
-	return totalDeleted;
 }
 
 export async function appendChatMessage(
@@ -588,7 +305,6 @@ export async function appendChatMessage(
 					userId: input.userId ?? null,
 					title: null,
 					summary: null,
-					memoryEntryIds: [],
 					createdAt,
 				},
 				$set: {
@@ -719,70 +435,6 @@ export async function getLatestJobContext(
 		latestJobUpdate,
 	};
 }
-
-export async function createMemoryEntry(
-	database: SmediaMongoDatabase,
-	input: {
-		pluginId: string;
-		kind: MemoryEntryKind;
-		scope: MemoryEntryScope;
-		sessionKey?: string | null;
-		guildId?: string | null;
-		channelId?: string | null;
-		userId?: string | null;
-		title?: string | null;
-		content: string;
-		tags?: string[];
-		metadata?: Document;
-		sourceSessionId?: ObjectId | null;
-		createdAt?: Date;
-		updatedAt?: Date;
-	},
-): Promise<MemoryEntryDocument> {
-	const createdAt = input.createdAt ?? new Date();
-	const updatedAt = input.updatedAt ?? createdAt;
-	const content = input.content.trim();
-	if (!content) {
-		throw new Error("Cannot create an empty memory entry.");
-	}
-
-	const document: MemoryEntryDocument = {
-		pluginId: input.pluginId,
-		kind: input.kind,
-		scope: input.scope,
-		sessionKey: input.sessionKey ?? null,
-		guildId: input.guildId ?? null,
-		channelId: input.channelId ?? null,
-		userId: input.userId ?? null,
-		title: input.title ?? null,
-		content,
-		tags: normalizeTags(input.tags ?? []),
-		metadata: input.metadata,
-		sourceSessionId: input.sourceSessionId ?? null,
-		createdAt,
-		updatedAt,
-	};
-
-	const result = await database.collections.memoryEntries.insertOne(document);
-	const insertedDocument: MemoryEntryDocument = {
-		...document,
-		_id: result.insertedId,
-	};
-
-	if (document.scope === "session" && document.sessionKey) {
-		await database.collections.chatSessions.updateOne(
-			{ pluginId: document.pluginId, sessionKey: document.sessionKey },
-			{
-				$addToSet: {
-					memoryEntryIds: result.insertedId,
-				},
-			},
-		);
-	}
-
-	return insertedDocument;
-}
-
 export async function upsertMemoryEntry(
 	database: SmediaMongoDatabase,
 	input: {
@@ -823,7 +475,6 @@ export async function upsertMemoryEntry(
 				scope: input.scope,
 				sessionKey: input.sessionKey ?? null,
 				userId: input.userId ?? null,
-				sourceSessionId: null,
 				createdAt: now,
 			},
 			$set: {
@@ -1332,29 +983,6 @@ export async function cancelProactiveOutboxItem(
 		},
 	);
 }
-
-export async function listMemoryEntries(
-	database: SmediaMongoDatabase,
-	input: {
-		pluginId: string;
-		kinds?: MemoryEntryKind[];
-		scope?: MemoryEntryScope;
-		sessionKey?: string;
-		guildId?: string;
-		channelId?: string;
-		userId?: string;
-		limit: number;
-	},
-): Promise<MemoryEntryDocument[]> {
-	const filter = buildMemoryFilter(input);
-
-	return database.collections.memoryEntries
-		.find(filter)
-		.sort({ updatedAt: -1, createdAt: -1 })
-		.limit(input.limit)
-		.toArray();
-}
-
 export async function listRecentShortTermSummariesForUser(
 	database: SmediaMongoDatabase,
 	input: {
@@ -1383,6 +1011,7 @@ export async function searchMemoryEntries(
 		kinds?: MemoryEntryKind[];
 		scope?: MemoryEntryScope;
 		userId?: string;
+		excludeSessionKey?: string;
 		limit: number;
 	},
 ): Promise<MemoryEntryDocument[]> {
@@ -1408,7 +1037,22 @@ export async function searchMemoryEntries(
 		filter.scope = input.scope;
 	}
 	if (input.userId) {
-		filter["metadata.participantUserIds"] = input.userId;
+		if (input.scope === "user") {
+			filter.userId = input.userId;
+		} else if (input.scope === "session") {
+			filter["metadata.participantUserIds"] = input.userId;
+		} else {
+			filter.$or = [
+				{ userId: input.userId },
+				{ "metadata.participantUserIds": input.userId },
+			];
+		}
+	}
+	if (input.excludeSessionKey) {
+		filter.sessionKey = {
+			...(typeof filter.sessionKey === "object" && filter.sessionKey !== null ? filter.sessionKey : {}),
+			$ne: input.excludeSessionKey,
+		};
 	}
 
 	return database.collections.memoryEntries
@@ -1725,11 +1369,6 @@ async function ensureIndexes(collections: SmediaMongoCollections): Promise<void>
 			{
 				key: { pluginId: 1, userId: 1, kind: 1, updatedAt: -1 },
 				name: "plugin_userId_kind_updatedAt",
-				sparse: true,
-			},
-			{
-				key: { sourceSessionId: 1 },
-				name: "sourceSessionId",
 				sparse: true,
 			},
 			{

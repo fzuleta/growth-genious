@@ -12,7 +12,6 @@
   "scripts": {
     "watch": "nodemon --watch src --watch apps --watch workspace-template --watch .env --ext ts,md,json --signal SIGTERM --exec \"tsx src/bot.ts\"",
     "veil": "tsx src/veil.ts",
-    "migrate": "tsx src/migrate-plugin-namespace.ts",
     "build": "tsc -p tsconfig.json",
     "test": "tsc --noEmit -p tsconfig.json"
   },

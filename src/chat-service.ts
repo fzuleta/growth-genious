@@ -85,7 +85,7 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 	}
 
 	const topicKeywords = input.routeDecision?.entityHints?.topicKeywords ?? [];
-	const [recentMessages, latestJobContext, contextMarkdown, memoryRecall] = await Promise.all([
+	const [recentMessages, latestJobContext, contextMarkdown, pastSessionRecall] = await Promise.all([
 		listRecentChatMessages(input.database, {
 			pluginId: input.pluginId,
 			sessionKey,
@@ -101,11 +101,15 @@ export async function generateChatReply(input: GenerateChatReplyInput): Promise<
 			? searchMemoryEntries(input.database, {
 				pluginId: input.pluginId,
 				keywords: topicKeywords,
-				kinds: ["short-term-summary", "long-term-profile"],
+				kinds: ["short-term-summary"],
+				scope: "session",
+				userId: input.userId,
+				excludeSessionKey: sessionKey,
 				limit: MAX_KEYWORD_MEMORY_MATCHES,
 			})
 			: Promise.resolve([] as MemoryEntryDocument[]),
 	]);
+	const memoryRecall = pastSessionRecall;
 	const promptInput = buildChatPrompt({
 		assistantName: input.assistantName,
 		channelId: input.channelId,

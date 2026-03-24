@@ -274,4 +274,3 @@ growth uninstall
 
 - Enable the Message Content intent for the Discord bot in the developer portal.
 - The MongoDB schema still retains historical job-related collections for compatibility with existing stored data.
-- If you are upgrading from pre-plugin namespacing data, run the migration in dry-run mode first: `npm run migrate -- --plugin growth-genius`, then execute it with `--apply` once the counts look correct.

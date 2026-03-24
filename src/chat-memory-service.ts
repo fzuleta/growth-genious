@@ -370,7 +370,7 @@ async function maybeRefreshLongTermProfileForUser(input: {
 			kind: { $in: ["chat", "command"] },
 			$or: [
 				{ authorRole: "user", userId: input.userId },
-				{ authorRole: "assistant" },
+				{ authorRole: "assistant", "metadata.relatedUserId": input.userId },
 			],
 			...(checkpoint?.lastParsedMessageAt
 				? {

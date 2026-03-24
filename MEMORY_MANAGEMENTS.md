@@ -4,8 +4,7 @@
 
 - The current memory system is a practical three-layer design: raw chat history in MongoDB, per-session short-term summaries, and per-user long-term profiles.
 - It is incremental, checkpoint-driven, plugin-scoped, and reasonably token-conscious. That is a solid foundation.
-- The biggest current issue is retrieval scoping: the main chat path can keyword-recall memory from other users and other sessions because keyword memory search is not scoped to the current user or session.
-- The second major issue is long-term profile construction: when refreshing one user's profile, the source query includes all assistant messages after that user's checkpoint, not just assistant messages from conversations involving that user.
+- The two highest-risk memory-boundary issues have now been fixed in code: main chat recall is restricted to same-user past session summaries, and long-term profile refresh only includes assistant messages explicitly linked to the target user.
 - The system is more of a compact summarization pipeline than a full memory platform. It has no semantic retrieval, no versioned memory history, no confidence model, and limited observability.
 - If memory quality is important, the first upgrades should be: tighten retrieval scope, fix long-term source selection, and introduce stronger memory entry typing plus better inspection tooling.
 
@@ -129,9 +128,9 @@ That separation is conceptually sound and maps well to how chat assistants shoul
 
 ## Main Weaknesses And Risks
 
-### 1. Main chat keyword recall is too broad
+### 1. Main chat keyword recall was too broad
 
-This is the most important issue.
+This was the most important issue, and it is now fixed.
 
 In `generateChatReply`, memory recall uses `searchMemoryEntries` with:
 
@@ -142,29 +141,29 @@ In `generateChatReply`, memory recall uses `searchMemoryEntries` with:
 - no `sessionKey`
 - no `scope`
 
-That means the model can recall memory entries from unrelated sessions and unrelated users inside the same plugin namespace.
+That previously meant the model could recall memory entries from unrelated sessions and unrelated users inside the same plugin namespace.
 
 Practical consequence:
 
-- A user asking about a topic can receive context pulled from someone else's session recap or long-term profile if the keywords overlap.
+- A user asking about a topic could receive context pulled from someone else's session recap or long-term profile if the keywords overlapped.
 
-This is both a quality problem and a privacy boundary problem.
+The recall path now only searches session-scoped short-term summaries for the current user and excludes the active session, while the current user's long-term profile continues to be injected directly from the snapshot.
 
-### 2. Long-term profile refresh likely mixes in assistant messages from other conversations
+### 2. Long-term profile refresh was mixing in assistant messages too broadly
 
 The source query for `maybeRefreshLongTermProfileForUser` includes:
 
 - user messages where `userId = targetUserId`
-- all assistant messages
+- assistant messages linked to the target user through reply metadata
 
-It does not constrain assistant messages by session, channel, or related user.
+Previously it did not constrain assistant messages by session, channel, or related user.
 
 Practical consequence:
 
-- While rebuilding one user's long-term profile, the assistant can ingest replies that were actually part of other users' conversations.
-- That can create inaccurate user profiles and false preference attribution.
+- While rebuilding one user's long-term profile, the assistant could ingest replies that were actually part of other users' conversations.
+- That could create inaccurate user profiles and false preference attribution.
 
-If memory quality matters, this should be treated as a real bug, not a minor tuning issue.
+The implementation now only includes assistant messages where `metadata.relatedUserId` matches the target user.
 
 ### 3. Search is regex-based, not semantic
 
