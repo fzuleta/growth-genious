@@ -321,6 +321,53 @@ async function repairLegacyPluginNamespace(
 		},
 	];
 
+	// Step 1: Delete null-pluginId docs that already have a migrated counterpart.
+	// Without this, the updateMany in step 2 silently skips docs that would violate
+	// an existing unique index, leaving orphaned null-pluginId duplicates.
+	await Promise.all([
+		deleteNullPluginIdConflicts(
+			collections.memoryEntries as unknown as Collection<Document>,
+			pluginId,
+			[
+				{ sessionKey: { $type: "string" } },
+				{ userId: { $type: "string" } },
+			],
+		),
+		deleteNullPluginIdConflicts(
+			collections.memoryCheckpoints as unknown as Collection<Document>,
+			pluginId,
+			[
+				{ sessionKey: { $type: "string" } },
+				{ userId: { $type: "string" } },
+			],
+		),
+	]);
+
+	// Step 2: Prune null-pluginId duplicates among themselves before migration.
+	await Promise.all([
+		pruneDuplicateDocuments(
+			collections.memoryEntries as unknown as Collection<Document>,
+			{ ...buildMissingPluginIdFilter(), sessionKey: { $type: "string" } },
+			{ kind: "$kind", scope: "$scope", sessionKey: "$sessionKey" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryEntries as unknown as Collection<Document>,
+			{ ...buildMissingPluginIdFilter(), userId: { $type: "string" } },
+			{ kind: "$kind", scope: "$scope", userId: "$userId" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryCheckpoints as unknown as Collection<Document>,
+			{ ...buildMissingPluginIdFilter(), sessionKey: { $type: "string" } },
+			{ kind: "$kind", sessionKey: "$sessionKey" },
+		),
+		pruneDuplicateDocuments(
+			collections.memoryCheckpoints as unknown as Collection<Document>,
+			{ ...buildMissingPluginIdFilter(), userId: { $type: "string" } },
+			{ kind: "$kind", userId: "$userId" },
+		),
+	]);
+
+	// Step 3: Set pluginId on remaining orphan docs and rewrite legacy session keys.
 	await Promise.all(
 		targets.map(async (target) => {
 			await target.collection.updateMany(buildMissingPluginIdFilter(), {
@@ -343,6 +390,7 @@ async function repairLegacyPluginNamespace(
 		}),
 	);
 
+	// Step 4: Prune post-migration duplicates (same as before).
 	await Promise.all([
 		pruneDuplicateDocuments(
 			collections.memoryEntries as unknown as Collection<Document>,
@@ -450,6 +498,47 @@ function compareDuplicateCandidates(left: DuplicateCandidate, right: DuplicateCa
 
 function toEpochMillis(value?: Date | null): number {
 	return value instanceof Date ? value.getTime() : 0;
+}
+
+async function deleteNullPluginIdConflicts(
+	collection: Collection<Document>,
+	targetPluginId: string,
+	scopeFilters: Document[],
+): Promise<number> {
+	const nullFilter = buildMissingPluginIdFilter();
+	let totalDeleted = 0;
+
+	for (const scopeFilter of scopeFilters) {
+		const nullDocs = await collection
+			.find({ ...nullFilter, ...scopeFilter }, { projection: { _id: 1, kind: 1, scope: 1, sessionKey: 1, userId: 1 } })
+			.toArray();
+
+		const idsToDelete: ObjectId[] = [];
+		for (const doc of nullDocs) {
+			const migratedFilter: Document = { pluginId: targetPluginId, kind: doc.kind };
+			if (doc.scope !== undefined) {
+				migratedFilter.scope = doc.scope;
+			}
+			if (typeof doc.sessionKey === "string") {
+				migratedFilter.sessionKey = doc.sessionKey;
+			}
+			if (typeof doc.userId === "string") {
+				migratedFilter.userId = doc.userId;
+			}
+
+			const exists = await collection.findOne(migratedFilter, { projection: { _id: 1 } });
+			if (exists) {
+				idsToDelete.push(doc._id as ObjectId);
+			}
+		}
+
+		if (idsToDelete.length > 0) {
+			await collection.deleteMany({ _id: { $in: idsToDelete } });
+			totalDeleted += idsToDelete.length;
+		}
+	}
+
+	return totalDeleted;
 }
 
 export async function appendChatMessage(
