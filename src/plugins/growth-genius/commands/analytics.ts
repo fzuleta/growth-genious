@@ -137,10 +137,23 @@ interface ExternalEndpointAiParameters {
 	fields: Record<string, ExternalEndpointAiFieldSchema>;
 }
 
+type ExternalEndpointAiFieldResolutionMode = "prefer-deterministic" | "deterministic-only" | "ai-only";
+
 interface ExternalEndpointAiFieldSchema {
 	type: "enum";
 	options: string[];
 	description?: string;
+	resolutionMode?: ExternalEndpointAiFieldResolutionMode;
+	analyticsRangeMapping?: ExternalEndpointAnalyticsRangeMapping;
+}
+
+interface ExternalEndpointAnalyticsRangeMapping {
+	anchor?: "any" | "today";
+	exactDayOptions?: {
+		today?: string;
+		yesterday?: string;
+	};
+	spanDayOptions?: Record<string, string>;
 }
 
 interface ExternalEndpointExecutionResult {
@@ -156,6 +169,16 @@ interface ExternalEndpointExecutionResult {
 	summaryText: string;
 	requestPayload: JsonObject;
 	responsePayload: JsonObject;
+}
+
+interface ExternalEndpointAiResolutionResult {
+	values: JsonObject;
+	debug: JsonObject;
+}
+
+interface ParsedExternalEndpointAiResponse {
+	fields: JsonObject;
+	debug: JsonObject;
 }
 
 export interface AnalyticsNaturalLanguageIntent {
@@ -2591,12 +2614,13 @@ async function executeExternalEndpointDefinition(input: {
 	const url = interpolateTemplateString(input.definition.url, input.context);
 	const headers = convertObjectToStringRecord(interpolateOptionalObject(input.definition.headers, input.context), "headers");
 	const query = convertObjectToStringRecord(interpolateOptionalObject(input.definition.query, input.context), "query");
-	const body = await buildExternalEndpointBody({
+	const bodyResult = await buildExternalEndpointBody({
 		definition: input.definition,
 		context: input.context,
 		promptText: input.promptText,
 		plugin: input.plugin,
 	});
+	const body = bodyResult.body;
 
 	const requestPayload: JsonObject = {
 		endpointId: input.endpointId,
@@ -2607,6 +2631,7 @@ async function executeExternalEndpointDefinition(input: {
 		query: query as JsonValue,
 		headers: headers as JsonValue,
 		body: body ?? null,
+		parameterResolution: bodyResult.parameterResolution,
 	};
 
 	try {
@@ -3048,12 +3073,87 @@ function validateExternalEndpointAiParameters(name: string, value: JsonObject): 
 				.filter((item): item is string => typeof item === "string")
 				.map((item) => item.trim()),
 			description: typeof fieldValue.description === "string" ? fieldValue.description.trim() : undefined,
+			resolutionMode:
+				fieldValue.resolutionMode === "deterministic-only"
+					? "deterministic-only"
+					: fieldValue.resolutionMode === "ai-only"
+						? "ai-only"
+						: "prefer-deterministic",
+			analyticsRangeMapping: isJsonObject(fieldValue.analyticsRangeMapping)
+				? validateExternalEndpointAnalyticsRangeMapping(name, fieldName, fieldValue.analyticsRangeMapping, fieldValue.options)
+				: undefined,
 		};
 	}
 
 	return {
 		prompt: typeof value.prompt === "string" ? value.prompt.trim() : undefined,
 		fields,
+	};
+}
+
+function validateExternalEndpointAnalyticsRangeMapping(
+	endpointName: string,
+	fieldName: string,
+	value: JsonObject,
+	options: unknown[],
+): ExternalEndpointAnalyticsRangeMapping {
+	if (value.anchor !== undefined && value.anchor !== "any" && value.anchor !== "today") {
+		throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.anchor must be 'any' or 'today'.`);
+	}
+
+	const optionSet = new Set(
+		options
+			.filter((item): item is string => typeof item === "string")
+			.map((item) => item.trim().toLowerCase()),
+	);
+
+	let exactDayOptions: ExternalEndpointAnalyticsRangeMapping["exactDayOptions"];
+	if (value.exactDayOptions !== undefined) {
+		if (!isJsonObject(value.exactDayOptions)) {
+			throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.exactDayOptions must be a JSON object.`);
+		}
+
+		exactDayOptions = {};
+		for (const key of ["today", "yesterday"] as const) {
+			const rawValue = value.exactDayOptions[key];
+			if (rawValue === undefined) {
+				continue;
+			}
+			if (typeof rawValue !== "string" || !rawValue.trim()) {
+				throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.exactDayOptions.${key} must be a non-empty string.`);
+			}
+			if (!optionSet.has(rawValue.trim().toLowerCase())) {
+				throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.exactDayOptions.${key} must match one of the declared enum options.`);
+			}
+			exactDayOptions[key] = rawValue.trim();
+		}
+	}
+
+	let spanDayOptions: Record<string, string> | undefined;
+	if (value.spanDayOptions !== undefined) {
+		if (!isJsonObject(value.spanDayOptions)) {
+			throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.spanDayOptions must be a JSON object.`);
+		}
+
+		spanDayOptions = {};
+		for (const [dayCount, rawOption] of Object.entries(value.spanDayOptions)) {
+			if (!/^\d+$/.test(dayCount) || Number(dayCount) <= 0) {
+				throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.spanDayOptions keys must be positive integer day counts.`);
+			}
+			if (typeof rawOption !== "string" || !rawOption.trim()) {
+				throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.spanDayOptions.${dayCount} must be a non-empty string.`);
+			}
+			if (!optionSet.has(rawOption.trim().toLowerCase())) {
+				throw new Error(`Endpoint '${endpointName}' aiParameters field '${fieldName}' analyticsRangeMapping.spanDayOptions.${dayCount} must match one of the declared enum options.`);
+			}
+			spanDayOptions[dayCount] = rawOption.trim();
+		}
+	}
+
+	return {
+		anchor: value.anchor === "today" ? "today" : "any",
+		exactDayOptions,
+		spanDayOptions,
 	};
 }
 
@@ -3111,58 +3211,91 @@ async function buildExternalEndpointBody(input: {
 	context: Record<string, string>;
 	promptText: string;
 	plugin: PluginContract;
-}): Promise<JsonValue | undefined> {
+}): Promise<{
+	body: JsonValue | undefined;
+	parameterResolution: JsonObject | null;
+}> {
 	const baseBody = input.definition.body === undefined
 		? undefined
 		: normalizeInterpolatedBody(interpolateJsonValue(input.definition.body, input.context));
 
 	if (!input.definition.aiParameters) {
-		return baseBody;
+		return {
+			body: baseBody,
+			parameterResolution: null,
+		};
 	}
 
-	const aiBodyFields = await resolveExternalEndpointAiParameters({
+	const aiResolution = await resolveExternalEndpointAiParameters({
 		definition: input.definition,
+		context: input.context,
 		promptText: input.promptText,
 		plugin: input.plugin,
 	});
+	const aiBodyFields = aiResolution?.values ?? null;
 	if (!aiBodyFields || Object.keys(aiBodyFields).length === 0) {
-		return baseBody;
+		return {
+			body: baseBody,
+			parameterResolution: aiResolution?.debug ?? null,
+		};
 	}
 
 	if (baseBody === undefined) {
-		return aiBodyFields;
+		return {
+			body: aiBodyFields,
+			parameterResolution: aiResolution?.debug ?? null,
+		};
 	}
 	if (!isJsonObject(baseBody)) {
 		throw new Error("AI-selected endpoint parameters require the base body to be a JSON object.");
 	}
 
 	return {
-		...baseBody,
-		...aiBodyFields,
+		body: {
+			...baseBody,
+			...aiBodyFields,
+		},
+		parameterResolution: aiResolution?.debug ?? null,
 	};
 }
 
 async function resolveExternalEndpointAiParameters(input: {
 	definition: ExternalEndpointDefinition;
+	context: Record<string, string>;
 	promptText: string;
 	plugin: PluginContract;
-}): Promise<JsonObject | null> {
+}): Promise<ExternalEndpointAiResolutionResult | null> {
 	const promptText = input.promptText.trim();
-	if (!promptText) {
-		return null;
-	}
 
 	const aiConfig = input.definition.aiParameters;
 	if (!aiConfig) {
 		return null;
 	}
 
-	const fields = Object.entries(aiConfig.fields).map(([name, config]) => ({
-		name,
-		type: config.type,
-		options: config.options,
-		description: config.description ?? null,
-	}));
+	const deterministicResolution = resolveDeterministicExternalEndpointAiParameters({
+		aiConfig,
+		context: input.context,
+	});
+	const deterministicFields = deterministicResolution.values;
+	const modelEligibleFields = Object.entries(aiConfig.fields)
+		.filter(([, config]) => config.resolutionMode !== "deterministic-only")
+		.filter(([fieldName, config]) => config.resolutionMode === "ai-only" || deterministicFields[fieldName] === undefined)
+		.map(([name, config]) => ({
+			name,
+			type: config.type,
+			options: config.options,
+			description: config.description ?? null,
+			resolutionMode: config.resolutionMode ?? "prefer-deterministic",
+		}));
+
+	if (!promptText || modelEligibleFields.length === 0) {
+		return Object.keys(deterministicFields).length > 0 || Object.keys(deterministicResolution.debug).length > 0
+			? {
+				values: deterministicFields,
+				debug: deterministicResolution.debug,
+			}
+			: null;
+	}
 
 	try {
 		const response = await generateText({
@@ -3177,10 +3310,12 @@ async function resolveExternalEndpointAiParameters(input: {
 						text: [
 							"You extract endpoint parameter values from a user's analytics request.",
 							"Return strict JSON only.",
-							"Output format: {\"fields\": {\"fieldName\": <selected enum value or null>}}",
+							"Output format: {\"fields\": {\"fieldName\": <selected enum value or null>}, \"confidence\": {\"fieldName\": \"low|medium|high\"}, \"reasons\": {\"fieldName\": \"brief why\"}}",
 							"Only choose a value when the user's request clearly implies it.",
 							"If a field is not clearly requested, return null for that field.",
 							"Never invent values outside the provided enum options.",
+							"Use high confidence only when the request is explicit or the analytics context strongly implies the value.",
+							"Keep reasons short and concrete.",
 							aiConfig.prompt || "",
 						].filter(Boolean).join("\n"),
 					}],
@@ -3191,23 +3326,268 @@ async function resolveExternalEndpointAiParameters(input: {
 						type: "input_text",
 						text: JSON.stringify({
 							userPrompt: promptText,
-							fields,
+							analyticsContext: {
+								operationKind: input.context.operationKind || null,
+								startDate: input.context.startDate || null,
+								endDate: input.context.endDate || null,
+								dateLabel: input.context.dateLabel || null,
+								presetName: input.context.presetName || null,
+								exploreName: input.context.exploreName || null,
+							},
+							fields: modelEligibleFields,
 						}),
 					}],
 				},
 			],
 		});
 
-		return parseExternalEndpointAiParameterResponse(response.text, aiConfig);
+		const parsedFields = parseExternalEndpointAiParameterResponse(response.text, aiConfig, modelEligibleFields.map((field) => field.name));
+		if (!parsedFields) {
+			return Object.keys(deterministicFields).length > 0 || Object.keys(deterministicResolution.debug).length > 0
+				? {
+					values: deterministicFields,
+					debug: deterministicResolution.debug,
+				}
+				: null;
+		}
+
+		return {
+			values: {
+				...parsedFields.fields,
+				...deterministicFields,
+			},
+			debug: {
+				...parsedFields.debug,
+				...deterministicResolution.debug,
+			},
+		};
 	} catch {
+		return Object.keys(deterministicFields).length > 0 || Object.keys(deterministicResolution.debug).length > 0
+			? {
+				values: deterministicFields,
+				debug: deterministicResolution.debug,
+			}
+			: null;
+	}
+}
+
+function resolveDeterministicExternalEndpointAiParameters(input: {
+	aiConfig: ExternalEndpointAiParameters;
+	context: Record<string, string>;
+}): ExternalEndpointAiResolutionResult {
+	const resolved: JsonObject = {};
+	const debug: JsonObject = {};
+
+	for (const [fieldName, fieldConfig] of Object.entries(input.aiConfig.fields)) {
+		const inferredValue = inferExternalEndpointEnumFieldValue(fieldName, fieldConfig, input.context);
+		if (inferredValue.value) {
+			resolved[fieldName] = inferredValue.value;
+			debug[fieldName] = {
+				value: inferredValue.value,
+				source: "deterministic",
+				confidence: "high",
+				resolutionMode: fieldConfig.resolutionMode ?? "prefer-deterministic",
+				reason: inferredValue.reason,
+			};
+		}
+	}
+
+	return {
+		values: resolved,
+		debug,
+	};
+}
+
+function inferExternalEndpointEnumFieldValue(
+	fieldName: string,
+	fieldConfig: ExternalEndpointAiFieldSchema,
+	context: Record<string, string>,
+): { value: string | null; reason: string | null } {
+	if (fieldConfig.type !== "enum") {
+		return { value: null, reason: null };
+	}
+
+	if (fieldConfig.analyticsRangeMapping) {
+		return inferAnalyticsTimeframeOptionFromMapping(fieldConfig.analyticsRangeMapping, context);
+	}
+
+	if (/(time|date|range)/i.test(fieldName)) {
+		const value = inferAnalyticsTimeframeOption(fieldConfig.options, context);
+		return {
+			value,
+			reason: value ? "generic-timeframe-inference" : null,
+		};
+	}
+
+	return { value: null, reason: null };
+}
+
+function inferAnalyticsTimeframeOption(options: string[], context: Record<string, string>): string | null {
+	if (options.length === 0) {
 		return null;
 	}
+
+	const optionMap = new Map(options.map((option) => [option.trim().toLowerCase(), option]));
+	const exactDayOption = inferExactAnalyticsDayOption(context, optionMap);
+	if (exactDayOption) {
+		return exactDayOption;
+	}
+
+	const explicitRangeOption = inferExplicitAnalyticsRangeOption(context, optionMap);
+	if (explicitRangeOption) {
+		return explicitRangeOption;
+	}
+
+	return null;
+}
+
+function inferAnalyticsTimeframeOptionFromMapping(
+	mapping: ExternalEndpointAnalyticsRangeMapping,
+	context: Record<string, string>,
+	): { value: string | null; reason: string | null } {
+	const exactDayOption = inferMappedExactAnalyticsDayOption(mapping, context);
+	if (exactDayOption.value) {
+		return exactDayOption;
+	}
+
+	return inferMappedAnalyticsSpanOption(mapping, context);
+}
+
+function inferMappedExactAnalyticsDayOption(
+	mapping: ExternalEndpointAnalyticsRangeMapping,
+	context: Record<string, string>,
+): { value: string | null; reason: string | null } {
+	const startDate = parseIsoDateOnly(context.startDate);
+	const endDate = parseIsoDateOnly(context.endDate);
+	if (!startDate || !endDate || startDate.getTime() !== endDate.getTime()) {
+		return { value: null, reason: null };
+	}
+
+	const exactDayOptions = mapping.exactDayOptions;
+	if (!exactDayOptions) {
+		return { value: null, reason: null };
+	}
+
+	const today = formatDate(new Date());
+	if (context.endDate === today && exactDayOptions.today) {
+		return { value: exactDayOptions.today, reason: "analyticsRangeMapping.exactDayOptions.today" };
+	}
+
+	const yesterdayDate = new Date();
+	yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+	if (context.endDate === formatDate(yesterdayDate) && exactDayOptions.yesterday) {
+		return { value: exactDayOptions.yesterday, reason: "analyticsRangeMapping.exactDayOptions.yesterday" };
+	}
+
+	return { value: null, reason: null };
+}
+
+function inferMappedAnalyticsSpanOption(
+	mapping: ExternalEndpointAnalyticsRangeMapping,
+	context: Record<string, string>,
+): { value: string | null; reason: string | null } {
+	const spanDayOptions = mapping.spanDayOptions;
+	if (!spanDayOptions) {
+		return { value: null, reason: null };
+	}
+
+	if (mapping.anchor === "today") {
+		const today = formatDate(new Date());
+		if (context.endDate !== today) {
+			return { value: null, reason: null };
+		}
+	}
+
+	const labelMatch = context.dateLabel.match(/^last-(\d+)-days$/i);
+	if (labelMatch) {
+		const mappedOption = spanDayOptions[labelMatch[1]];
+		if (mappedOption) {
+			return { value: mappedOption, reason: `analyticsRangeMapping.spanDayOptions.${labelMatch[1]}` };
+		}
+	}
+
+	const startDate = parseIsoDateOnly(context.startDate);
+	const endDate = parseIsoDateOnly(context.endDate);
+	if (!startDate || !endDate) {
+		return { value: null, reason: null };
+	}
+
+	const diffDays = Math.floor((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+	if (diffDays <= 0) {
+		return { value: null, reason: null };
+	}
+
+	const mappedOption = spanDayOptions[String(diffDays)] ?? null;
+	return {
+		value: mappedOption,
+		reason: mappedOption ? `analyticsRangeMapping.spanDayOptions.${diffDays}` : null,
+	};
+}
+
+function inferExactAnalyticsDayOption(
+	context: Record<string, string>,
+	optionMap: Map<string, string>,
+): string | null {
+	const startDate = parseIsoDateOnly(context.startDate);
+	const endDate = parseIsoDateOnly(context.endDate);
+	if (!startDate || !endDate || startDate.getTime() !== endDate.getTime()) {
+		return null;
+	}
+
+	const today = formatDate(new Date());
+	if (context.endDate === today && optionMap.has("today")) {
+		return optionMap.get("today") ?? null;
+	}
+
+	const yesterdayDate = new Date();
+	yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+	if (context.endDate === formatDate(yesterdayDate) && optionMap.has("yesterday")) {
+		return optionMap.get("yesterday") ?? null;
+	}
+
+	return null;
+}
+
+function inferExplicitAnalyticsRangeOption(
+	context: Record<string, string>,
+	optionMap: Map<string, string>,
+): string | null {
+	const labelMatch = context.dateLabel.match(/^last-(\d+)-days$/i);
+	if (labelMatch) {
+		const labelOption = optionMap.get(`${labelMatch[1]}d`);
+		if (labelOption) {
+			return labelOption;
+		}
+	}
+
+	const startDate = parseIsoDateOnly(context.startDate);
+	const endDate = parseIsoDateOnly(context.endDate);
+	if (!startDate || !endDate) {
+		return null;
+	}
+
+	const diffDays = Math.floor((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+	if (diffDays <= 0) {
+		return null;
+	}
+
+	return optionMap.get(`${diffDays}d`) ?? null;
+}
+
+function parseIsoDateOnly(value: string | undefined): Date | null {
+	if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		return null;
+	}
+
+	const parsed = new Date(`${value}T00:00:00.000Z`);
+	return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function parseExternalEndpointAiParameterResponse(
 	text: string,
 	aiConfig: ExternalEndpointAiParameters,
-): JsonObject | null {
+	allowedFields?: string[],
+): ParsedExternalEndpointAiResponse | null {
 	const normalized = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 	if (!normalized) {
 		return null;
@@ -3220,7 +3600,18 @@ function parseExternalEndpointAiParameterResponse(
 		}
 
 		const output: JsonObject = {};
+		const debug: JsonObject = {};
+		const confidenceMap = parsed.confidence && typeof parsed.confidence === "object" && !Array.isArray(parsed.confidence)
+			? parsed.confidence as Record<string, unknown>
+			: {};
+		const reasonMap = parsed.reasons && typeof parsed.reasons === "object" && !Array.isArray(parsed.reasons)
+			? parsed.reasons as Record<string, unknown>
+			: {};
+		const allowedFieldSet = new Set((allowedFields ?? Object.keys(aiConfig.fields)).map((field) => field.trim()));
 		for (const [fieldName, fieldConfig] of Object.entries(aiConfig.fields)) {
+			if (!allowedFieldSet.has(fieldName)) {
+				continue;
+			}
 			const rawValue = (parsed.fields as Record<string, unknown>)[fieldName];
 			if (rawValue === null || rawValue === undefined || typeof rawValue !== "string") {
 				continue;
@@ -3229,10 +3620,24 @@ function parseExternalEndpointAiParameterResponse(
 			const matchedValue = fieldConfig.options.find((option) => option.toLowerCase() === rawValue.trim().toLowerCase());
 			if (matchedValue) {
 				output[fieldName] = matchedValue;
+				const rawConfidence = typeof confidenceMap[fieldName] === "string" ? confidenceMap[fieldName].trim().toLowerCase() : "medium";
+				const confidence = rawConfidence === "high" || rawConfidence === "low" ? rawConfidence : "medium";
+				debug[fieldName] = {
+					value: matchedValue,
+					source: "model",
+					confidence,
+					resolutionMode: fieldConfig.resolutionMode ?? "prefer-deterministic",
+					reason: typeof reasonMap[fieldName] === "string" && reasonMap[fieldName].trim().length > 0
+						? truncateString(reasonMap[fieldName].trim(), 160)
+						: "model-selected",
+				};
 			}
 		}
 
-		return output;
+		return {
+			fields: output,
+			debug,
+		};
 	} catch {
 		return null;
 	}

@@ -60,6 +60,8 @@ Examples:
 - Each file is one named endpoint that runs alongside report-style `/analytics` executions
 - Required fields: `url`, `apiKeyEnv`
 - Optional fields: `name`, `description`, `method`, `headers`, `query`, `body`, `summaryFields`, `enabled`
+- `aiParameters.fields.<name>.analyticsRangeMapping` can explicitly map GA date ranges to endpoint enum values using `anchor`, `exactDayOptions`, and `spanDayOptions`
+- `aiParameters.fields.<name>.resolutionMode` controls how each field is chosen: `prefer-deterministic` (default), `deterministic-only`, or `ai-only`
 - `x-api-key` is always sent using the value from the env var named by `apiKeyEnv`
 - String fields inside `url`, `query`, `headers`, and `body` support these templates: `{{propertyId}}`, `{{startDate}}`, `{{endDate}}`, `{{dateLabel}}`, `{{operationKind}}`, `{{presetName}}`, `{{exploreName}}`
 - See `apps/growth-genius/data/endpoints/example.json` for the supported shape

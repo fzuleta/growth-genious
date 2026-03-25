@@ -11,7 +11,20 @@
 			"timeframe": {
 				"type": "enum",
 				"options": ["today", "yesterday", "7d", "30d", "90d"],
-				"description": "Choose the requested time range for top games."
+				"description": "Choose the requested time range for top games.",
+				"resolutionMode": "deterministic-only",
+				"analyticsRangeMapping": {
+					"anchor": "today",
+					"exactDayOptions": {
+						"today": "today",
+						"yesterday": "yesterday"
+					},
+					"spanDayOptions": {
+						"7": "7d",
+						"30": "30d",
+						"90": "90d"
+					}
+				}
 			},
 			"sortBy": {
 				"type": "enum",
