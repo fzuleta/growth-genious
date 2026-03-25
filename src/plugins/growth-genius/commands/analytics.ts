@@ -2539,34 +2539,31 @@ async function executeConfiguredExternalEndpoints(input: {
 	}
 
 	const context = buildExternalEndpointTemplateContext(input.operation, input.propertyId);
-	const results: ExternalEndpointExecutionResult[] = [];
-	for (const endpointId of endpointIds) {
-		const definition = await loadExternalEndpointDefinition(input.endpointsDir, endpointId);
-		if (definition.enabled === false) {
-			continue;
-		}
-
-		results.push(await executeExternalEndpointDefinition({
+	const definitions = await Promise.all(
+		endpointIds.map(async (endpointId) => ({
 			endpointId,
-			definition,
-			context,
-			promptText: input.promptText,
-			plugin: input.plugin,
-		}));
-	}
+			definition: await loadExternalEndpointDefinition(input.endpointsDir, endpointId),
+		})),
+	);
+	const enabledEndpoints = definitions.filter(({ definition }) => definition.enabled !== false);
+
+	const results = await Promise.all(
+		enabledEndpoints.map(({ endpointId, definition }) =>
+			executeExternalEndpointDefinition({
+				endpointId,
+				definition,
+				context,
+				promptText: input.promptText,
+				plugin: input.plugin,
+			}),
+		),
+	);
 
 	return results;
 }
 
 function buildExternalEndpointTemplateContext(operation: AnalyticsOperationRequest, propertyId: string): Record<string, string> {
-	const envContext = Object.fromEntries(
-		Object.entries(process.env)
-			.filter((entry): entry is [string, string] => typeof entry[1] === "string")
-			.map(([key, value]) => [key, value.trim()]),
-	);
-
 	return {
-		...envContext,
 		propertyId,
 		operationKind: operation.kind,
 		startDate: operation.dateRange?.startDate ?? "",
@@ -2703,6 +2700,7 @@ async function runExternalEndpointRequest(input: {
 		method: input.method,
 		headers: requestHeaders,
 		body: input.body === undefined ? undefined : JSON.stringify(input.body),
+		signal: AbortSignal.timeout(15_000),
 	});
 
 	const contentType = response.headers.get("content-type")?.split(";")[0]?.trim();
@@ -2860,6 +2858,59 @@ function buildExternalEndpointSummaryMarkdown(results: ExternalEndpointExecution
 		"",
 		...results.map((result) => `- ${result.displayName}: ${result.summaryText}`),
 	].join("\n");
+}
+
+function buildExternalEndpointDataPreview(responsePayload: JsonObject): string[] {
+	const body = responsePayload.body;
+	if (body === null || body === undefined) {
+		return ["*No data returned.*"];
+	}
+
+	if (Array.isArray(body)) {
+		const lines: string[] = [`items: ${body.length}`];
+		for (const item of body.slice(0, 15)) {
+			if (isJsonObject(item)) {
+				const parts = Object.entries(item)
+					.slice(0, 6)
+					.map(([k, v]) => `${k}=${summarizeJsonPrimitive(v)}`);
+				lines.push(`- ${parts.join(", ")}`);
+			} else {
+				lines.push(`- ${summarizeJsonPrimitive(item)}`);
+			}
+		}
+		if (body.length > 15) {
+			lines.push(`- ... and ${body.length - 15} more items`);
+		}
+		return lines;
+	}
+
+	if (isJsonObject(body)) {
+		const lines: string[] = [];
+		for (const [key, value] of Object.entries(body)) {
+			if (lines.length >= 20) {
+				lines.push(`- ... and ${Object.keys(body).length - 20} more keys`);
+				break;
+			}
+			if (Array.isArray(value)) {
+				lines.push(`- ${key}: ${value.length} items`);
+				for (const item of value.slice(0, 5)) {
+					if (isJsonObject(item)) {
+						const parts = Object.entries(item)
+							.slice(0, 6)
+							.map(([k, v]) => `${k}=${summarizeJsonPrimitive(v)}`);
+						lines.push(`  - ${parts.join(", ")}`);
+					} else {
+						lines.push(`  - ${summarizeJsonPrimitive(item)}`);
+					}
+				}
+			} else {
+				lines.push(`- ${key}: ${summarizeJsonPrimitive(value)}`);
+			}
+		}
+		return lines.length > 0 ? lines : ["*Empty response object.*"];
+	}
+
+	return [summarizeJsonPrimitive(body)];
 }
 
 function appendExternalEndpointResultsToReply(reply: string, results: ExternalEndpointExecutionResult[]): string {
