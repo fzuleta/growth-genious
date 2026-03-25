@@ -1,0 +1,23 @@
+{
+	"name": "Casino Top Games",
+	"description": "Fortunes Veil top games analytics endpoint.",
+	"url": "https://api.fortunesveil.com/casino/top-games",
+	"method": "POST",
+	"apiKeyEnv": "ENDPOINT_SECRET",
+	"body": {},
+	"aiParameters": {
+		"prompt": "Map the user's analytics request to the most relevant top-games filters. Only set a field when the request clearly indicates it.",
+		"fields": {
+			"timeframe": {
+				"type": "enum",
+				"options": ["today", "yesterday", "7d", "30d", "90d"],
+				"description": "Choose the requested time range for top games."
+			},
+			"sortBy": {
+				"type": "enum",
+				"options": ["bets", "wins", "plays"],
+				"description": "Choose the metric the user seems to care about for ranking top games."
+			}
+		}
+	}
+}

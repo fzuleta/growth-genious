@@ -1,0 +1,8 @@
+{
+	"name": "Casino Analytics",
+	"description": "Fortunes Veil casino analytics summary endpoint.",
+	"url": "https://api.fortunesveil.com/casino/analytics/get",
+	"method": "POST",
+	"apiKeyEnv": "ENDPOINT_SECRET",
+	"body": {}
+}

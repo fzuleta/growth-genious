@@ -160,6 +160,8 @@ Accepted forms:
 - `/analytics realtime {json}`
 - `/analytics help`
 
+Report-style analytics runs also execute any configured endpoint files under `apps/growth-genius/data/endpoints/*.json`, sending `x-api-key` from the env var named by each file's `apiKeyEnv`. The low-level GA-only forms (`metadata`, `admin`, `report`, `pivot`, `funnel`, `realtime`) do not trigger external endpoint calls.
+
 The expanded command surface is intended to unlock property-wide analytics access instead of a single hardcoded summary. `metadata` exposes the available metrics and dimensions for the property, including custom definitions and key-event-derived metrics. Admin list endpoints expose supporting configuration like custom dimensions, custom metrics, key events, streams, and selected linked resources.
 
 Important limitation: GA4 supports funnel and pivot style exploration queries through public APIs, but Google does not expose saved Explore boards or saved explorations as listable/readable API resources.

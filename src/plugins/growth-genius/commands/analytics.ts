@@ -19,6 +19,7 @@ const GOOGLE_ANALYTICS_DATA_API_BETA_BASE = "https://analyticsdata.googleapis.co
 const GOOGLE_ANALYTICS_DATA_API_ALPHA_BASE = "https://analyticsdata.googleapis.com/v1alpha";
 const GOOGLE_ANALYTICS_ADMIN_API_BETA_BASE = "https://analyticsadmin.googleapis.com/v1beta";
 const GOOGLE_ANALYTICS_ADMIN_API_ALPHA_BASE = "https://analyticsadmin.googleapis.com/v1alpha";
+const EXTERNAL_ENDPOINTS_DIRECTORY_NAME = "endpoints";
 const DEFAULT_LOOKBACK_DAYS = 7;
 const MAX_LOOKBACK_DAYS = 90;
 const MAX_METADATA_PREVIEW_ITEMS = 25;
@@ -114,6 +115,47 @@ interface AnalyticsExecutionResult {
 	responsePayload: JsonObject;
 	summaryMarkdown: string;
 	legacyReportArtifact?: JsonObject;
+	externalResults?: ExternalEndpointExecutionResult[];
+}
+
+interface ExternalEndpointDefinition {
+	url: string;
+	apiKeyEnv: string;
+	name?: string;
+	description?: string;
+	method?: string;
+	enabled?: boolean;
+	headers?: JsonObject;
+	query?: JsonObject;
+	body?: JsonValue;
+	summaryFields?: string[];
+	aiParameters?: ExternalEndpointAiParameters;
+}
+
+interface ExternalEndpointAiParameters {
+	prompt?: string;
+	fields: Record<string, ExternalEndpointAiFieldSchema>;
+}
+
+interface ExternalEndpointAiFieldSchema {
+	type: "enum";
+	options: string[];
+	description?: string;
+}
+
+interface ExternalEndpointExecutionResult {
+	endpointId: string;
+	displayName: string;
+	description?: string;
+	method: string;
+	url: string;
+	apiKeyEnv: string;
+	success: boolean;
+	statusCode?: number;
+	contentType?: string;
+	summaryText: string;
+	requestPayload: JsonObject;
+	responsePayload: JsonObject;
 }
 
 export interface AnalyticsNaturalLanguageIntent {
@@ -399,10 +441,12 @@ export async function executeAnalyticsInvocation(
 	const analyticsOutputDir = path.join(input.outputDir, "analytics");
 	await mkdir(analyticsOutputDir, { recursive: true });
 
+	const appDataDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data");
 	const propertyId = process.env.GOOGLE_ANALYTICS_PROPERTY_ID!.trim();
 	const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL!.trim();
 	const serviceAccountPrivateKey = normalizePrivateKey(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY!);
-	const exploreDir = path.resolve(path.dirname(path.resolve(process.cwd(), input.plugin.envFilePath)), "data", "explore");
+	const exploreDir = path.join(appDataDir, "explore");
+	const externalEndpointsDir = path.join(appDataDir, EXTERNAL_ENDPOINTS_DIRECTORY_NAME);
 	const operation = parseAnalyticsOperation(options.args);
 
 	const accessToken = await getGoogleAccessToken({
@@ -410,13 +454,28 @@ export async function executeAnalyticsInvocation(
 		serviceAccountPrivateKey,
 	});
 
-	const execution = await executeAnalyticsOperation({
+	const externalResults = shouldExecuteExternalEndpoints(operation)
+		? await executeConfiguredExternalEndpoints({
+			endpointsDir: externalEndpointsDir,
+			operation,
+			propertyId,
+			promptText: options.originalPrompt?.trim() || input.content.trim(),
+			plugin: input.plugin,
+		  })
+		: [];
+
+	let execution = await executeAnalyticsOperation({
 		propertyId,
 		accessToken,
 		operation,
 		plugin: input.plugin,
 		exploreDir,
+		externalResults,
 	});
+
+	if (externalResults.length > 0) {
+		execution = mergeExternalEndpointResults(execution, externalResults);
+	}
 
 	const requestedAt = new Date().toISOString();
 	const requestArtifactPath = path.join(analyticsOutputDir, "latest-request.json");
@@ -481,9 +540,12 @@ export async function executeAnalyticsInvocation(
 			plugin: input.plugin,
 		  })
 		: execution.reply;
+	const finalReply = execution.externalResults?.length
+		? appendExternalEndpointResultsToReply(reply, execution.externalResults)
+		: reply;
 
 	return {
-		reply,
+		reply: finalReply,
 		outputFiles,
 		diagnostics: options.nlIntent ? buildAnalyticsInterpretationDiagnostics(options.nlIntent) : undefined,
 	};
@@ -667,12 +729,13 @@ async function executeAnalyticsOperation(input: {
 	operation: AnalyticsOperationRequest;
 	plugin: PluginContract;
 	exploreDir: string;
+	externalResults: ExternalEndpointExecutionResult[];
 }): Promise<AnalyticsExecutionResult> {
 	switch (input.operation.kind) {
 		case "help":
 			return await buildHelpExecutionResult(input.exploreDir);
 		case "comprehensive":
-			return await executeComprehensiveReport(input.propertyId, input.accessToken, input.operation.dateRange!, input.exploreDir, input.plugin);
+			return await executeComprehensiveReport(input.propertyId, input.accessToken, input.operation.dateRange!, input.exploreDir, input.plugin, input.externalResults);
 		case "legacy-report":
 			return await executeLegacyReport(input.propertyId, input.accessToken, input.operation.dateRange!);
 		case "metadata":
@@ -745,6 +808,12 @@ async function buildHelpExecutionResult(exploreDir: string): Promise<AnalyticsEx
 		"- `/analytics funnel {\"days\":30,\"funnel\":{\"steps\":[{\"name\":\"Landing\",\"filterExpression\":{\"funnelEventFilter\":{\"eventName\":\"page_view\"}}},{\"name\":\"Purchase\",\"filterExpression\":{\"funnelEventFilter\":{\"eventName\":\"purchase\"}}}]}}`",
 		"- `/analytics realtime {\"dimensions\":[\"eventName\"],\"metrics\":[\"eventCount\"],\"limit\":10}`",
 		"",
+		"## External endpoints",
+		"",
+		"- Report-style runs (`/analytics`, presets, explicit date ranges, and `/analytics explore <name>`) also call any JSON endpoint definitions found in `apps/growth-genius/data/endpoints/`.",
+		"- Each endpoint request sends `x-api-key` using the env var named by the endpoint definition's `apiKeyEnv` field.",
+		"- `metadata`, `admin`, `report`, `pivot`, `funnel`, and `realtime` stay GA-only.",
+		"",
 		"## Notes",
 		"",
 		"- `metadata` is the way to discover property-specific metrics, dimensions, custom definitions, and key-event-derived metrics.",
@@ -775,6 +844,7 @@ async function executeComprehensiveReport(
 	dateRange: AnalyticsDateRange,
 	exploreDir: string,
 	plugin: PluginContract,
+	externalResults: ExternalEndpointExecutionResult[],
 ): Promise<AnalyticsExecutionResult> {
 	const dateRanges = [{ startDate: dateRange.startDate, endDate: dateRange.endDate }];
 
@@ -890,6 +960,19 @@ async function executeComprehensiveReport(
 			`## Explore: ${displayName}${description}`,
 			"",
 			...buildTopRowsPreview(explore.report, 20),
+		);
+	}
+
+	for (const extResult of externalResults) {
+		if (!extResult.success) {
+			continue;
+		}
+		const extDescription = extResult.description ? ` — ${extResult.description}` : "";
+		dataSections.push(
+			"",
+			`## External Endpoint: ${extResult.displayName}${extDescription}`,
+			"",
+			...buildExternalEndpointDataPreview(extResult.responsePayload),
 		);
 	}
 
@@ -2129,6 +2212,7 @@ function buildHelpText(): string {
 		"- '/analytics funnel {json}'",
 		"- '/analytics realtime {json}'",
 		"- '/analytics help'",
+		"Report-style runs also execute configured external endpoints from apps/growth-genius/data/endpoints/*.json.",
 	].join("\n");
 }
 
@@ -2350,7 +2434,7 @@ async function generateNaturalLanguageAnalyticsReply(input: {
 						{
 							type: "input_text",
 							text: [
-								"You answer a user's analytics question using the provided GA4 summary.",
+								"You answer a user's analytics question using the provided analytics summary, which may include Google Analytics and external endpoint results.",
 								"Answer the user's actual question directly, not the command that was run.",
 								"Use concrete numbers from the summary when available.",
 								"If the data only partially answers the question, say that briefly and explain what the current result does show.",
@@ -2433,6 +2517,720 @@ function parseNLAnalyticsModelResponse(text: string): NLAnalyticsModelResponse |
 
 function cloneJsonObject(value: JsonObject): JsonObject {
 	return JSON.parse(JSON.stringify(value)) as JsonObject;
+}
+
+function shouldExecuteExternalEndpoints(operation: AnalyticsOperationRequest): boolean {
+	return operation.kind === "comprehensive"
+		|| operation.kind === "legacy-report"
+		|| operation.kind === "preset"
+		|| operation.kind === "explore";
+}
+
+async function executeConfiguredExternalEndpoints(input: {
+	endpointsDir: string;
+	operation: AnalyticsOperationRequest;
+	propertyId: string;
+	promptText: string;
+	plugin: PluginContract;
+}): Promise<ExternalEndpointExecutionResult[]> {
+	const endpointIds = await listSavedExternalEndpoints(input.endpointsDir);
+	if (endpointIds.length === 0) {
+		return [];
+	}
+
+	const context = buildExternalEndpointTemplateContext(input.operation, input.propertyId);
+	const results: ExternalEndpointExecutionResult[] = [];
+	for (const endpointId of endpointIds) {
+		const definition = await loadExternalEndpointDefinition(input.endpointsDir, endpointId);
+		if (definition.enabled === false) {
+			continue;
+		}
+
+		results.push(await executeExternalEndpointDefinition({
+			endpointId,
+			definition,
+			context,
+			promptText: input.promptText,
+			plugin: input.plugin,
+		}));
+	}
+
+	return results;
+}
+
+function buildExternalEndpointTemplateContext(operation: AnalyticsOperationRequest, propertyId: string): Record<string, string> {
+	const envContext = Object.fromEntries(
+		Object.entries(process.env)
+			.filter((entry): entry is [string, string] => typeof entry[1] === "string")
+			.map(([key, value]) => [key, value.trim()]),
+	);
+
+	return {
+		...envContext,
+		propertyId,
+		operationKind: operation.kind,
+		startDate: operation.dateRange?.startDate ?? "",
+		endDate: operation.dateRange?.endDate ?? "",
+		dateLabel: operation.dateRange?.label ?? "",
+		presetName: operation.presetName ?? "",
+		exploreName: operation.exploreName ?? "",
+	};
+}
+
+async function executeExternalEndpointDefinition(input: {
+	endpointId: string;
+	definition: ExternalEndpointDefinition;
+	context: Record<string, string>;
+	promptText: string;
+	plugin: PluginContract;
+}): Promise<ExternalEndpointExecutionResult> {
+	const apiKeyValue = process.env[input.definition.apiKeyEnv]?.trim();
+	if (!apiKeyValue) {
+		throw new Error(`Configured analytics endpoint '${input.endpointId}' is missing env var ${input.definition.apiKeyEnv}.`);
+	}
+
+	const displayName = input.definition.name?.trim() || input.endpointId;
+	const method = resolveExternalEndpointMethod(input.definition.method, input.definition.body);
+	const url = interpolateTemplateString(input.definition.url, input.context);
+	const headers = convertObjectToStringRecord(interpolateOptionalObject(input.definition.headers, input.context), "headers");
+	const query = convertObjectToStringRecord(interpolateOptionalObject(input.definition.query, input.context), "query");
+	const body = await buildExternalEndpointBody({
+		definition: input.definition,
+		context: input.context,
+		promptText: input.promptText,
+		plugin: input.plugin,
+	});
+
+	const requestPayload: JsonObject = {
+		endpointId: input.endpointId,
+		name: displayName,
+		url,
+		method,
+		apiKeyEnv: input.definition.apiKeyEnv,
+		query: query as JsonValue,
+		headers: headers as JsonValue,
+		body: body ?? null,
+	};
+
+	try {
+		const response = await runExternalEndpointRequest({
+			url,
+			method,
+			apiKey: apiKeyValue,
+			headers,
+			query,
+			body,
+		});
+		return {
+			endpointId: input.endpointId,
+			displayName,
+			description: input.definition.description,
+			method,
+			url,
+			apiKeyEnv: input.definition.apiKeyEnv,
+			success: response.success,
+			statusCode: response.statusCode,
+			contentType: response.contentType,
+			summaryText: buildExternalEndpointSummaryText({
+				success: response.success,
+				statusCode: response.statusCode,
+				responseBody: response.body,
+				definition: input.definition,
+				errorMessage: response.errorMessage,
+			}),
+			requestPayload,
+			responsePayload: {
+				ok: response.success,
+				statusCode: response.statusCode,
+				contentType: response.contentType ?? null,
+				...(response.errorMessage ? { error: response.errorMessage } : {}),
+				body: response.body,
+			},
+		};
+	} catch (error) {
+		const errorMessage = formatErrorMessage(error);
+		return {
+			endpointId: input.endpointId,
+			displayName,
+			description: input.definition.description,
+			method,
+			url,
+			apiKeyEnv: input.definition.apiKeyEnv,
+			success: false,
+			summaryText: `error | ${truncateString(errorMessage, 200)}`,
+			requestPayload,
+			responsePayload: {
+				ok: false,
+				error: errorMessage,
+				body: null,
+			},
+		};
+	}
+}
+
+async function runExternalEndpointRequest(input: {
+	url: string;
+	method: string;
+	apiKey: string;
+	headers: Record<string, string>;
+	query: Record<string, string>;
+	body?: JsonValue;
+}): Promise<{
+	success: boolean;
+	statusCode: number;
+	contentType?: string;
+	body: JsonValue;
+	errorMessage?: string;
+}> {
+	const url = new URL(input.url);
+	for (const [key, value] of Object.entries(input.query)) {
+		url.searchParams.set(key, value);
+	}
+
+	if ((input.method === "GET" || input.method === "DELETE") && input.body !== undefined) {
+		throw new Error(`Configured analytics endpoint ${url.toString()} cannot send a request body with ${input.method}.`);
+	}
+
+	const requestHeaders: Record<string, string> = {
+		...input.headers,
+		"x-api-key": input.apiKey,
+	};
+	if (input.body !== undefined && !Object.keys(requestHeaders).some((key) => key.toLowerCase() === "content-type")) {
+		requestHeaders["content-type"] = "application/json";
+	}
+
+	const response = await fetch(url, {
+		method: input.method,
+		headers: requestHeaders,
+		body: input.body === undefined ? undefined : JSON.stringify(input.body),
+	});
+
+	const contentType = response.headers.get("content-type")?.split(";")[0]?.trim();
+	const bodyText = await response.text();
+	const body = parseHttpResponseBody(contentType, bodyText);
+
+	return {
+		success: response.ok,
+		statusCode: response.status,
+		contentType,
+		body,
+		errorMessage: response.ok ? undefined : `HTTP ${response.status}`,
+	};
+}
+
+function parseHttpResponseBody(contentType: string | undefined, bodyText: string): JsonValue {
+	const trimmed = bodyText.trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	if (contentType?.includes("json") || /^[\[{]/.test(trimmed)) {
+		try {
+			return JSON.parse(trimmed) as JsonValue;
+		} catch {
+			return truncateString(trimmed, 1000);
+		}
+	}
+
+	return truncateString(trimmed, 1000);
+}
+
+function buildExternalEndpointSummaryText(input: {
+	success: boolean;
+	statusCode: number;
+	responseBody: JsonValue;
+	definition: ExternalEndpointDefinition;
+	errorMessage?: string;
+}): string {
+	if (!input.success) {
+		const failureDetail = input.errorMessage ? ` | ${input.errorMessage}` : "";
+		return `error (${input.statusCode})${failureDetail}`;
+	}
+
+	const preview = summarizeExternalEndpointBody(input.responseBody, input.definition.summaryFields);
+	return preview ? `ok (${input.statusCode}) | ${preview}` : `ok (${input.statusCode})`;
+}
+
+function summarizeExternalEndpointBody(body: JsonValue, summaryFields?: string[]): string {
+	if (summaryFields && summaryFields.length > 0) {
+		const selected = summaryFields
+			.map((field) => {
+				const value = getJsonPathValue(body, field);
+				if (value === undefined) {
+					return null;
+				}
+				return `${field}=${summarizeJsonPrimitive(value)}`;
+			})
+			.filter((value): value is string => Boolean(value));
+		if (selected.length > 0) {
+			return selected.join(", ");
+		}
+	}
+
+	if (Array.isArray(body)) {
+		return `items=${body.length}`;
+	}
+
+	if (isJsonObject(body)) {
+		const parts: string[] = [];
+		for (const [key, value] of Object.entries(body)) {
+			if (parts.length >= 4) {
+				break;
+			}
+			if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+				parts.push(`${key}=${summarizeJsonPrimitive(value)}`);
+				continue;
+			}
+			if (Array.isArray(value)) {
+				parts.push(`${key}[${value.length}]`);
+			}
+		}
+		return parts.join(", ") || `keys=${Object.keys(body).slice(0, 6).join(",") || "none"}`;
+	}
+
+	return summarizeJsonPrimitive(body);
+}
+
+function summarizeJsonPrimitive(value: JsonValue): string {
+	if (value === null) {
+		return "null";
+	}
+	if (typeof value === "string") {
+		return truncateString(value, 120);
+	}
+	if (typeof value === "number" || typeof value === "boolean") {
+		return String(value);
+	}
+	if (Array.isArray(value)) {
+		return `items=${value.length}`;
+	}
+	return `keys=${Object.keys(value).slice(0, 6).join(",") || "none"}`;
+}
+
+function getJsonPathValue(value: JsonValue, pathValue: string): JsonValue | undefined {
+	const segments = pathValue.split(".").map((part) => part.trim()).filter(Boolean);
+	let current: JsonValue | undefined = value;
+	for (const segment of segments) {
+		if (current === undefined || current === null) {
+			return undefined;
+		}
+		if (Array.isArray(current)) {
+			const index = Number(segment);
+			if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+				return undefined;
+			}
+			current = current[index];
+			continue;
+		}
+		if (!isJsonObject(current)) {
+			return undefined;
+		}
+		current = current[segment];
+	}
+	return current;
+}
+
+function mergeExternalEndpointResults(
+	execution: AnalyticsExecutionResult,
+	results: ExternalEndpointExecutionResult[],
+): AnalyticsExecutionResult {
+	const summarySection = buildExternalEndpointSummaryMarkdown(results);
+	return {
+		...execution,
+		requestPayload: {
+			...execution.requestPayload,
+			externalEndpoints: results.map((result) => result.requestPayload) as JsonValue,
+		},
+		responsePayload: {
+			...execution.responsePayload,
+			externalEndpoints: Object.fromEntries(results.map((result) => [result.endpointId, result.responsePayload])) as JsonValue,
+		},
+		summaryMarkdown: summarySection ? `${execution.summaryMarkdown}\n\n${summarySection}` : execution.summaryMarkdown,
+		externalResults: results,
+	};
+}
+
+function buildExternalEndpointSummaryMarkdown(results: ExternalEndpointExecutionResult[]): string {
+	if (results.length === 0) {
+		return "";
+	}
+
+	return [
+		"## External Endpoints",
+		"",
+		...results.map((result) => `- ${result.displayName}: ${result.summaryText}`),
+	].join("\n");
+}
+
+function appendExternalEndpointResultsToReply(reply: string, results: ExternalEndpointExecutionResult[]): string {
+	if (results.length === 0) {
+		return reply;
+	}
+
+	return [
+		reply,
+		"",
+		"## External Endpoints",
+		"",
+		...results.map((result) => `- ${result.displayName}: ${result.summaryText}`),
+	].join("\n");
+}
+
+async function loadExternalEndpointDefinition(endpointsDir: string, name: string): Promise<ExternalEndpointDefinition> {
+	const safeName = path.basename(name).replace(/\.json$/i, "");
+	const filePath = path.join(endpointsDir, `${safeName}.json`);
+	const resolved = path.resolve(filePath);
+	if (!resolved.startsWith(path.resolve(endpointsDir))) {
+		throw new Error(`Invalid endpoint name '${name}'.`);
+	}
+
+	let content: string;
+	try {
+		content = await readFile(resolved, "utf8");
+	} catch {
+		const available = await listSavedExternalEndpoints(endpointsDir);
+		const hint = available.length > 0
+			? `Available endpoints: ${available.join(", ")}.`
+			: `No endpoints found in ${path.relative(process.cwd(), endpointsDir)}/. Add a .json file to get started.`;
+		throw new Error(`External endpoint '${safeName}' not found at ${path.relative(process.cwd(), resolved)}. ${hint}`);
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch {
+		throw new Error(`Invalid JSON in endpoint file '${safeName}.json'.`);
+	}
+
+	if (!isJsonObject(parsed)) {
+		throw new Error(`Endpoint file '${safeName}.json' must contain a JSON object.`);
+	}
+
+	return validateExternalEndpointDefinition(safeName, parsed);
+}
+
+async function listSavedExternalEndpoints(endpointsDir: string): Promise<string[]> {
+	try {
+		const entries = await readdir(endpointsDir);
+		return entries
+			.filter((entry) => entry.endsWith(".json"))
+			.map((entry) => entry.replace(/\.json$/i, ""))
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
+function validateExternalEndpointDefinition(name: string, value: JsonObject): ExternalEndpointDefinition {
+	if (typeof value.url !== "string" || !value.url.trim()) {
+		throw new Error(`Endpoint '${name}' must define a non-empty string 'url'.`);
+	}
+	if (typeof value.apiKeyEnv !== "string" || !value.apiKeyEnv.trim()) {
+		throw new Error(`Endpoint '${name}' must define a non-empty string 'apiKeyEnv'.`);
+	}
+	if (value.method !== undefined && typeof value.method !== "string") {
+		throw new Error(`Endpoint '${name}' field 'method' must be a string.`);
+	}
+	if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+		throw new Error(`Endpoint '${name}' field 'enabled' must be a boolean.`);
+	}
+	if (value.name !== undefined && typeof value.name !== "string") {
+		throw new Error(`Endpoint '${name}' field 'name' must be a string.`);
+	}
+	if (value.description !== undefined && typeof value.description !== "string") {
+		throw new Error(`Endpoint '${name}' field 'description' must be a string.`);
+	}
+	if (value.headers !== undefined && !isJsonObject(value.headers)) {
+		throw new Error(`Endpoint '${name}' field 'headers' must be a JSON object.`);
+	}
+	if (value.query !== undefined && !isJsonObject(value.query)) {
+		throw new Error(`Endpoint '${name}' field 'query' must be a JSON object.`);
+	}
+	if (value.summaryFields !== undefined) {
+		if (!Array.isArray(value.summaryFields) || value.summaryFields.some((item) => typeof item !== "string" || !item.trim())) {
+			throw new Error(`Endpoint '${name}' field 'summaryFields' must be an array of non-empty strings.`);
+		}
+	}
+	if (value.aiParameters !== undefined && !isJsonObject(value.aiParameters)) {
+		throw new Error(`Endpoint '${name}' field 'aiParameters' must be a JSON object.`);
+	}
+
+	return {
+		url: value.url.trim(),
+		apiKeyEnv: value.apiKeyEnv.trim(),
+		name: typeof value.name === "string" ? value.name.trim() : undefined,
+		description: typeof value.description === "string" ? value.description.trim() : undefined,
+		method: typeof value.method === "string" ? value.method.trim() : undefined,
+		enabled: typeof value.enabled === "boolean" ? value.enabled : undefined,
+		headers: isJsonObject(value.headers) ? cloneJsonObject(value.headers) : undefined,
+		query: isJsonObject(value.query) ? cloneJsonObject(value.query) : undefined,
+		body: value.body,
+		summaryFields: Array.isArray(value.summaryFields)
+			? value.summaryFields
+				.filter((item): item is string => typeof item === "string")
+				.map((item) => item.trim())
+			: undefined,
+		aiParameters: isJsonObject(value.aiParameters) ? validateExternalEndpointAiParameters(name, value.aiParameters) : undefined,
+	};
+}
+
+function validateExternalEndpointAiParameters(name: string, value: JsonObject): ExternalEndpointAiParameters {
+	if (!isJsonObject(value.fields) || Object.keys(value.fields).length === 0) {
+		throw new Error(`Endpoint '${name}' field 'aiParameters.fields' must be a non-empty JSON object.`);
+	}
+
+	const fields: Record<string, ExternalEndpointAiFieldSchema> = {};
+	for (const [fieldName, fieldValue] of Object.entries(value.fields)) {
+		if (!isJsonObject(fieldValue)) {
+			throw new Error(`Endpoint '${name}' aiParameters field '${fieldName}' must be a JSON object.`);
+		}
+		if (fieldValue.type !== "enum") {
+			throw new Error(`Endpoint '${name}' aiParameters field '${fieldName}' currently only supports type 'enum'.`);
+		}
+		if (!Array.isArray(fieldValue.options) || fieldValue.options.some((item) => typeof item !== "string" || !item.trim())) {
+			throw new Error(`Endpoint '${name}' aiParameters field '${fieldName}' must define a non-empty string array in 'options'.`);
+		}
+
+		fields[fieldName] = {
+			type: "enum",
+			options: fieldValue.options
+				.filter((item): item is string => typeof item === "string")
+				.map((item) => item.trim()),
+			description: typeof fieldValue.description === "string" ? fieldValue.description.trim() : undefined,
+		};
+	}
+
+	return {
+		prompt: typeof value.prompt === "string" ? value.prompt.trim() : undefined,
+		fields,
+	};
+}
+
+function resolveExternalEndpointMethod(method: string | undefined, body: JsonValue | undefined): string {
+	const normalized = method?.trim().toUpperCase() || (body === undefined ? "GET" : "POST");
+	if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(normalized)) {
+		throw new Error(`Unsupported external endpoint method '${normalized}'. Use GET, POST, PUT, PATCH, or DELETE.`);
+	}
+	return normalized;
+}
+
+function interpolateTemplateString(value: string, context: Record<string, string>): string {
+	return value.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key: string) => context[key] ?? "");
+}
+
+function interpolateJsonValue(value: JsonValue, context: Record<string, string>): JsonValue {
+	if (typeof value === "string") {
+		return interpolateTemplateString(value, context);
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => interpolateJsonValue(item, context));
+	}
+	if (!isJsonObject(value)) {
+		return value;
+	}
+
+	const normalized: JsonObject = {};
+	for (const [key, childValue] of Object.entries(value)) {
+		normalized[key] = interpolateJsonValue(childValue, context);
+	}
+	return normalized;
+}
+
+function interpolateOptionalObject(value: JsonObject | undefined, context: Record<string, string>): JsonObject | undefined {
+	if (!value) {
+		return undefined;
+	}
+	const interpolated = interpolateJsonValue(value, context);
+	if (!isJsonObject(interpolated)) {
+		throw new Error("Interpolated endpoint object must remain a JSON object.");
+	}
+	return interpolated;
+}
+
+function normalizeInterpolatedBody(value: JsonValue): JsonValue {
+	const normalized = pruneEmptyTemplateValues(value);
+	if (normalized === undefined) {
+		return {};
+	}
+	return normalized;
+}
+
+async function buildExternalEndpointBody(input: {
+	definition: ExternalEndpointDefinition;
+	context: Record<string, string>;
+	promptText: string;
+	plugin: PluginContract;
+}): Promise<JsonValue | undefined> {
+	const baseBody = input.definition.body === undefined
+		? undefined
+		: normalizeInterpolatedBody(interpolateJsonValue(input.definition.body, input.context));
+
+	if (!input.definition.aiParameters) {
+		return baseBody;
+	}
+
+	const aiBodyFields = await resolveExternalEndpointAiParameters({
+		definition: input.definition,
+		promptText: input.promptText,
+		plugin: input.plugin,
+	});
+	if (!aiBodyFields || Object.keys(aiBodyFields).length === 0) {
+		return baseBody;
+	}
+
+	if (baseBody === undefined) {
+		return aiBodyFields;
+	}
+	if (!isJsonObject(baseBody)) {
+		throw new Error("AI-selected endpoint parameters require the base body to be a JSON object.");
+	}
+
+	return {
+		...baseBody,
+		...aiBodyFields,
+	};
+}
+
+async function resolveExternalEndpointAiParameters(input: {
+	definition: ExternalEndpointDefinition;
+	promptText: string;
+	plugin: PluginContract;
+}): Promise<JsonObject | null> {
+	const promptText = input.promptText.trim();
+	if (!promptText) {
+		return null;
+	}
+
+	const aiConfig = input.definition.aiParameters;
+	if (!aiConfig) {
+		return null;
+	}
+
+	const fields = Object.entries(aiConfig.fields).map(([name, config]) => ({
+		name,
+		type: config.type,
+		options: config.options,
+		description: config.description ?? null,
+	}));
+
+	try {
+		const response = await generateText({
+			task: "router",
+			model: getAnalyticsIntentModel(input.plugin),
+			plugin: input.plugin,
+			input: [
+				{
+					role: "system",
+					content: [{
+						type: "input_text",
+						text: [
+							"You extract endpoint parameter values from a user's analytics request.",
+							"Return strict JSON only.",
+							"Output format: {\"fields\": {\"fieldName\": <selected enum value or null>}}",
+							"Only choose a value when the user's request clearly implies it.",
+							"If a field is not clearly requested, return null for that field.",
+							"Never invent values outside the provided enum options.",
+							aiConfig.prompt || "",
+						].filter(Boolean).join("\n"),
+					}],
+				},
+				{
+					role: "user",
+					content: [{
+						type: "input_text",
+						text: JSON.stringify({
+							userPrompt: promptText,
+							fields,
+						}),
+					}],
+				},
+			],
+		});
+
+		return parseExternalEndpointAiParameterResponse(response.text, aiConfig);
+	} catch {
+		return null;
+	}
+}
+
+function parseExternalEndpointAiParameterResponse(
+	text: string,
+	aiConfig: ExternalEndpointAiParameters,
+): JsonObject | null {
+	const normalized = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+	if (!normalized) {
+		return null;
+	}
+
+	try {
+		const parsed = JSON.parse(normalized) as Record<string, unknown>;
+		if (!parsed.fields || typeof parsed.fields !== "object" || Array.isArray(parsed.fields)) {
+			return null;
+		}
+
+		const output: JsonObject = {};
+		for (const [fieldName, fieldConfig] of Object.entries(aiConfig.fields)) {
+			const rawValue = (parsed.fields as Record<string, unknown>)[fieldName];
+			if (rawValue === null || rawValue === undefined || typeof rawValue !== "string") {
+				continue;
+			}
+
+			const matchedValue = fieldConfig.options.find((option) => option.toLowerCase() === rawValue.trim().toLowerCase());
+			if (matchedValue) {
+				output[fieldName] = matchedValue;
+			}
+		}
+
+		return output;
+	} catch {
+		return null;
+	}
+}
+
+function pruneEmptyTemplateValues(value: JsonValue): JsonValue | undefined {
+	if (typeof value === "string") {
+		return value.trim() === "" ? undefined : value;
+	}
+
+	if (Array.isArray(value)) {
+		const normalizedItems = value
+			.map((item) => pruneEmptyTemplateValues(item))
+			.filter((item): item is JsonValue => item !== undefined);
+		return normalizedItems;
+	}
+
+	if (!isJsonObject(value)) {
+		return value;
+	}
+
+	const normalized: JsonObject = {};
+	for (const [key, childValue] of Object.entries(value)) {
+		const nextValue = pruneEmptyTemplateValues(childValue);
+		if (nextValue !== undefined) {
+			normalized[key] = nextValue;
+		}
+	}
+	return normalized;
+}
+
+function convertObjectToStringRecord(value: JsonObject | undefined, label: string): Record<string, string> {
+	if (!value) {
+		return {};
+	}
+
+	const normalized: Record<string, string> = {};
+	for (const [key, childValue] of Object.entries(value)) {
+		if (typeof childValue === "string" || typeof childValue === "number" || typeof childValue === "boolean") {
+			normalized[key] = String(childValue);
+			continue;
+		}
+		throw new Error(`Endpoint ${label} values must be strings, numbers, or booleans. Invalid key: ${key}.`);
+	}
+	return normalized;
+}
+
+function truncateString(value: string, maxLength: number): string {
+	return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 3))}...` : value;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

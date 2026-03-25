@@ -20,6 +20,17 @@ This plugin owns the `growth-genius` runtime surface.
 - `/analytics realtime {...json...}`: runs an arbitrary GA4 realtime report request
 - `/analytics help`: prints the supported command forms and examples
 
+Report-style analytics runs also execute any configured external endpoints found in `apps/growth-genius/data/endpoints/` and send `x-api-key` using the env var named by each endpoint file's `apiKeyEnv` field.
+
+GA-only forms that do not call external endpoints:
+
+- `/analytics metadata ...`
+- `/analytics admin ...`
+- `/analytics report ...`
+- `/analytics pivot ...`
+- `/analytics funnel ...`
+- `/analytics realtime ...`
+
 Examples:
 
 - `/analytics report {"days":30,"dimensions":["eventName"],"metrics":["eventCount"],"limit":25}`
@@ -43,6 +54,16 @@ Examples:
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
 - `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`
 
+## External Endpoint Config
+
+- Place endpoint definition files in `apps/growth-genius/data/endpoints/*.json`
+- Each file is one named endpoint that runs alongside report-style `/analytics` executions
+- Required fields: `url`, `apiKeyEnv`
+- Optional fields: `name`, `description`, `method`, `headers`, `query`, `body`, `summaryFields`, `enabled`
+- `x-api-key` is always sent using the value from the env var named by `apiKeyEnv`
+- String fields inside `url`, `query`, `headers`, and `body` support these templates: `{{propertyId}}`, `{{startDate}}`, `{{endDate}}`, `{{dateLabel}}`, `{{operationKind}}`, `{{presetName}}`, `{{exploreName}}`
+- See `apps/growth-genius/data/endpoints/example.json` for the supported shape
+
 Artifacts are written under `output/growth-genius/analytics/` as:
 
 - `latest-request.json`
@@ -55,3 +76,4 @@ Notes:
 - `metadata` is the main way to discover all metrics, dimensions, custom definitions, and key-event-derived metrics that the property exposes through the GA4 Data API.
 - The command now spans GA4 Data API report surfaces plus selected Admin API list endpoints.
 - GA4 supports pivot and funnel-style exploration queries through API endpoints, but Google does not expose saved Explore boards or saved explorations as listable resources through the public APIs.
+- External endpoint request and response details are merged into `latest-request.json`, `latest-response.json`, and `latest-summary.md` whenever report-style analytics runs execute them.
