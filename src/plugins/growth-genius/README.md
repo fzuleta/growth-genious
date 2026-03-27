@@ -20,7 +20,9 @@ This plugin owns the `growth-genius` runtime surface.
 - `/analytics realtime {...json...}`: runs an arbitrary GA4 realtime report request
 - `/analytics help`: prints the supported command forms and examples
 
-Report-style analytics runs also execute any configured external endpoints found in `apps/growth-genius/data/endpoints/` and send `x-api-key` using the env var named by each endpoint file's `apiKeyEnv` field.
+Explicit slash analytics commands (`/analytics` and `/a`) execute any configured external endpoints found in `apps/growth-genius/data/endpoints/` for report-style requests and send `x-api-key` using the env var named by each endpoint file's `apiKeyEnv` field.
+
+Those endpoint results are included alongside the Google Analytics data in report analysis. Natural-language analytics routing does not trigger the external endpoint calls.
 
 GA-only forms that do not call external endpoints:
 
@@ -57,7 +59,7 @@ Examples:
 ## External Endpoint Config
 
 - Place endpoint definition files in `apps/growth-genius/data/endpoints/*.json`
-- Each file is one named endpoint that runs alongside report-style `/analytics` executions
+- Each file is one named endpoint that runs alongside report-style `/analytics` or `/a` executions
 - Required fields: `url`, `apiKeyEnv`
 - Optional fields: `name`, `description`, `method`, `headers`, `query`, `body`, `summaryFields`, `enabled`
 - `aiParameters.fields.<name>.analyticsRangeMapping` can explicitly map GA date ranges to endpoint enum values using `anchor`, `exactDayOptions`, and `spanDayOptions`

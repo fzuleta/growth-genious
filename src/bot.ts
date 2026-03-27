@@ -48,6 +48,7 @@ const availablePlugins = listAvailablePlugins();
 const STATUS_COMMAND_PREFIX = "/status";
 const MEMORY_REFRESH_COMMAND_PREFIX = "/refreshmemory";
 const MEMORY_INSPECT_COMMAND_PREFIX = "/memory";
+const SELF_MODIFY_CANCEL_COMMAND_PREFIX = "/cancelplan";
 const DISCORD_MESSAGE_LIMIT = 2000;
 const CHAT_DEBOUNCE_MS = 1500;
 const MEMORY_CONSOLIDATION_INTERVAL_MS = 10 * 60 * 1000;
@@ -207,13 +208,32 @@ client.on("messageCreate", async (message) => {
 		return;
 	}
 
+	if (content === SELF_MODIFY_CANCEL_COMMAND_PREFIX) {
+		await persistInboundDiscordMessage(mongoDatabase, message, "command", {
+			commandName: SELF_MODIFY_CANCEL_COMMAND_PREFIX,
+			memoryEligible: false,
+		});
+
+		const activeSession = await getActiveSelfModifySession(mongoDatabase, currentPlugin.id, message.channelId);
+		if (!activeSession) {
+			await replyToMessage(mongoDatabase, message, "There is no active self-modify session in this channel.", "command", {
+				commandName: SELF_MODIFY_CANCEL_COMMAND_PREFIX,
+				memoryEligible: false,
+			});
+			return;
+		}
+
+		await handleSelfModifyCancel(mongoDatabase, message, activeSession);
+		return;
+	}
+
 	// Self-modify session interception: check if there's an active session awaiting approval
 	if (message.author.id === commandUserId) {
 		try {
 			const activeSession = await getActiveSelfModifySession(mongoDatabase, currentPlugin.id, message.channelId);
 			if (activeSession && activeSession.state === "awaiting-approval") {
 				const normalized = content.trim().toLowerCase();
-				if (/^(approve|go|yes|lgtm|do it|go ahead|ship it)$/i.test(normalized)) {
+				if (isSelfModifyApprovalMessage(normalized)) {
 					await persistInboundDiscordMessage(mongoDatabase, message, "command", {
 						commandName: "self-modify-approve",
 						memoryEligible: true,
@@ -221,7 +241,7 @@ client.on("messageCreate", async (message) => {
 					await handleSelfModifyApproval(mongoDatabase, message, activeSession);
 					return;
 				}
-				if (/^(cancel|no|stop|abort|nevermind)$/i.test(normalized)) {
+				if (isSelfModifyCancelMessage(normalized)) {
 					await persistInboundDiscordMessage(mongoDatabase, message, "command", {
 						commandName: "self-modify-cancel",
 						memoryEligible: true,
@@ -229,10 +249,11 @@ client.on("messageCreate", async (message) => {
 					await handleSelfModifyCancel(mongoDatabase, message, activeSession);
 					return;
 				}
-				// Treat as feedback — re-plan with user input
-				await persistInboundDiscordMessage(mongoDatabase, message, "chat");
-				await handleSelfModifyFeedback(mongoDatabase, message, activeSession, content);
-				return;
+				if (shouldTreatMessageAsSelfModifyFeedback(content)) {
+					await persistInboundDiscordMessage(mongoDatabase, message, "chat");
+					await handleSelfModifyFeedback(mongoDatabase, message, activeSession, content);
+					return;
+				}
 			}
 		} catch (error: unknown) {
 			logWarn("Self-modify session check failed", {
@@ -479,7 +500,7 @@ async function handleSelfModifyStart(
 				result.plan,
 				"",
 				"---",
-				"Reply **approve** to execute, **cancel** to abort, or provide feedback to revise the plan.",
+				"Reply **approve** to execute, **cancel** or **/cancelplan** to abort, or start your message with **feedback:** to revise the plan.",
 			].join("\n");
 			await replyToMessage(database, message, planMessage, "chat");
 		}
@@ -559,7 +580,7 @@ async function handleSelfModifyFeedback(
 				result.plan,
 				"",
 				"---",
-				"Reply **approve** to execute, **cancel** to abort, or provide more feedback.",
+				"Reply **approve** to execute, **cancel** or **/cancelplan** to abort, or start your message with **feedback:** to revise the plan again.",
 			].join("\n");
 			await replyToMessage(database, message, planMessage, "chat");
 		}
@@ -901,8 +922,40 @@ function isBotCommand(content: string): boolean {
 	return (
 		content === STATUS_COMMAND_PREFIX ||
 		content === MEMORY_REFRESH_COMMAND_PREFIX ||
-		content === MEMORY_INSPECT_COMMAND_PREFIX
+		content === MEMORY_INSPECT_COMMAND_PREFIX ||
+		content === SELF_MODIFY_CANCEL_COMMAND_PREFIX
 	);
+}
+
+function isSelfModifyApprovalMessage(content: string): boolean {
+	return /^(approve|go|yes|lgtm|do it|go ahead|ship it)$/i.test(content);
+}
+
+function isSelfModifyCancelMessage(content: string): boolean {
+	return /^(cancel|no|stop|abort|nevermind|never mind|exit planning|stop planning|discard plan|ignore plan)$/i.test(content);
+}
+
+function shouldTreatMessageAsSelfModifyFeedback(content: string): boolean {
+	const normalized = content.trim();
+	if (!normalized || normalized.startsWith("/") || looksLikeStandaloneJsonPayload(normalized)) {
+		return false;
+	}
+
+	return /^(feedback\s*:|revise\s*:|replan\s*:)/i.test(normalized) || /\b(plan|replan|revise|feedback)\b/i.test(normalized);
+}
+
+function looksLikeStandaloneJsonPayload(content: string): boolean {
+	const trimmed = content.trim();
+	if (!((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) {
+		return false;
+	}
+
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return typeof parsed === "object" && parsed !== null;
+	} catch {
+		return false;
+	}
 }
 
 async function replyToMessage(

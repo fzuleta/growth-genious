@@ -160,7 +160,7 @@ Accepted forms:
 - `/analytics realtime {json}`
 - `/analytics help`
 
-Report-style analytics runs also execute any configured endpoint files under `apps/growth-genius/data/endpoints/*.json`, sending `x-api-key` from the env var named by each file's `apiKeyEnv`. The low-level GA-only forms (`metadata`, `admin`, `report`, `pivot`, `funnel`, `realtime`) do not trigger external endpoint calls.
+Explicit slash analytics commands (`/analytics` and `/a`) run configured endpoint files under `apps/growth-genius/data/endpoints/*.json` only for report-style requests, sending `x-api-key` from the env var named by each file's `apiKeyEnv`. Those endpoint results are included alongside the GA data for report analysis. Natural-language analytics routing and the low-level GA-only forms (`metadata`, `admin`, `report`, `pivot`, `funnel`, `realtime`) do not trigger external endpoint calls.
 
 The expanded command surface is intended to unlock property-wide analytics access instead of a single hardcoded summary. `metadata` exposes the available metrics and dimensions for the property, including custom definitions and key-event-derived metrics. Admin list endpoints expose supporting configuration like custom dimensions, custom metrics, key events, streams, and selected linked resources.
 

@@ -141,6 +141,7 @@ async function buildChatRoutePromptInput(input: {
 						"Use workspace-question for repository docs, workspace templates, configuration, source tree layout, or other repository facts that need retrieval.",
 						"Use code-analysis when the user wants you to inspect source code, review an implementation, analyze a file, or provide recommendations without modifying code.",
 						"Use self-modify when the user is asking the bot to write code, implement features, fix bugs, refactor source files, add plugin support, or make any change to the codebase itself.",
+						"A raw JSON object/array, log dump, stack trace, or pasted data by itself is not a self-modify request. Only use self-modify when the user explicitly asks for a code change.",
 						pluginCustomRoutes.length > 0
 							? "Use custom when the message clearly matches one of the active plugin custom routes. When you do, set entityHints.customRouteName to the exact declared route name."
 							: "Only use custom when the active plugin explicitly exposes a custom route.",
@@ -209,6 +210,10 @@ function classifyWithHeuristics(content: string): ChatRouteDecision | null {
 	const normalized = content.trim().toLowerCase();
 	if (normalized.length <= DIRECT_CONVERSATION_MAX_LENGTH && /^(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|yo)[!.? ]*$/i.test(normalized)) {
 		return buildFallbackDecision("conversation", content, "short-greeting");
+	}
+
+	if (looksLikeStandaloneJsonPayload(content)) {
+		return buildFallbackDecision("conversation", content, "raw-json-payload");
 	}
 
 	if (
@@ -326,6 +331,10 @@ function parseClassifierOutput(outputText: string, fallbackContent: string): Cha
 			return buildFallbackDecision("conversation", fallbackContent, "low-confidence");
 		}
 
+		if (route === "self-modify" && looksLikeStandaloneJsonPayload(fallbackContent)) {
+			return buildFallbackDecision("conversation", fallbackContent, "raw-json-payload");
+		}
+
 		const topicKeywords = Array.isArray(parsed.entityHints?.topicKeywords)
 			? parsed.entityHints.topicKeywords
 					.filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim().length > 0)
@@ -376,6 +385,20 @@ function stripJsonCodeFence(text: string): string {
 	}
 
 	return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+}
+
+function looksLikeStandaloneJsonPayload(content: string): boolean {
+	const trimmed = content.trim();
+	if (!((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) {
+		return false;
+	}
+
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return typeof parsed === "object" && parsed !== null;
+	} catch {
+		return false;
+	}
 }
 
 function buildFallbackDecision(route: ChatRouteDecision["route"], content: string, reason: string): ChatRouteDecision {

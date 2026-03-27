@@ -477,7 +477,10 @@ export async function executeAnalyticsInvocation(
 		serviceAccountPrivateKey,
 	});
 
-	const externalResults = shouldExecuteExternalEndpoints(operation)
+	const externalResults = shouldExecuteExternalEndpoints({
+		operation,
+		requestSource: options.requestSource,
+	})
 		? await executeConfiguredExternalEndpoints({
 			endpointsDir: externalEndpointsDir,
 			operation,
@@ -833,8 +836,9 @@ async function buildHelpExecutionResult(exploreDir: string): Promise<AnalyticsEx
 		"",
 		"## External endpoints",
 		"",
-		"- Report-style runs (`/analytics`, presets, explicit date ranges, and `/analytics explore <name>`) also call any JSON endpoint definitions found in `apps/growth-genius/data/endpoints/`.",
+		"- Explicit slash-command report-style runs (`/analytics`, `/a`, presets, explicit date ranges, and `/analytics explore <name>`) also call any JSON endpoint definitions found in `apps/growth-genius/data/endpoints/`.",
 		"- Each endpoint request sends `x-api-key` using the env var named by the endpoint definition's `apiKeyEnv` field.",
+		"- Natural-language analytics routing stays GA-only until you invoke `/analytics` or `/a` directly.",
 		"- `metadata`, `admin`, `report`, `pivot`, `funnel`, and `realtime` stay GA-only.",
 		"",
 		"## Notes",
@@ -1061,16 +1065,17 @@ async function generateComprehensiveAISummary(
 				content: [{
 					type: "input_text",
 					text: [
-						"You are a senior growth analyst. The user will provide Google Analytics 4 data from the last reporting period.",
+						"You are a senior growth analyst. The user will provide a reporting dataset that includes Google Analytics 4 data and may include supplemental external endpoint results for the same period.",
 						"Your job is to produce a concise, actionable report in Markdown with:",
 						"1. **Executive Summary** — 2-3 sentence high-level takeaway.",
 						"2. **Key Metrics** — highlight the most important numbers (users, sessions, engagement, bounce rate, top events).",
 						"3. **Trends & Patterns** — what changed, what stands out, any anomalies.",
 						"4. **Top Content & Sources** — which pages and traffic sources are performing well or poorly.",
 						"5. **Custom Explore Insights** — insights from any custom explore data included.",
-						"6. **Recommendations** — 3-5 concrete, prioritized actions to improve growth.",
+						"6. **External Endpoint Insights** — incorporate any supplemental endpoint results when they add context or explain the GA movement.",
+						"7. **Recommendations** — 3-5 concrete, prioritized actions to improve growth.",
 						"",
-						"Be specific with numbers. Reference actual data points. Keep it concise but thorough.",
+						"Be specific with numbers. Reference actual data points. When external data is present, synthesize it with the GA trends instead of treating it as a separate appendix. Keep it concise but thorough.",
 						"Format for Discord (Markdown). Do not exceed 1800 characters in total.",
 					].join("\n"),
 				}],
@@ -2235,7 +2240,7 @@ function buildHelpText(): string {
 		"- '/analytics funnel {json}'",
 		"- '/analytics realtime {json}'",
 		"- '/analytics help'",
-		"Report-style runs also execute configured external endpoints from apps/growth-genius/data/endpoints/*.json.",
+		"Explicit slash-command report-style runs (`/analytics`, `/a`, presets, explicit date ranges, and `/analytics explore <name>`) also execute configured external endpoints from apps/growth-genius/data/endpoints/*.json.",
 	].join("\n");
 }
 
@@ -2542,11 +2547,18 @@ function cloneJsonObject(value: JsonObject): JsonObject {
 	return JSON.parse(JSON.stringify(value)) as JsonObject;
 }
 
-function shouldExecuteExternalEndpoints(operation: AnalyticsOperationRequest): boolean {
-	return operation.kind === "comprehensive"
-		|| operation.kind === "legacy-report"
-		|| operation.kind === "preset"
-		|| operation.kind === "explore";
+function shouldExecuteExternalEndpoints(input: {
+	operation: AnalyticsOperationRequest;
+	requestSource: string;
+}): boolean {
+	if (input.requestSource !== "/analytics") {
+		return false;
+	}
+
+	return input.operation.kind === "comprehensive"
+		|| input.operation.kind === "legacy-report"
+		|| input.operation.kind === "preset"
+		|| input.operation.kind === "explore";
 }
 
 async function executeConfiguredExternalEndpoints(input: {

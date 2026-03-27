@@ -241,7 +241,7 @@ function formatStalledApprovalReminder(sessionId: string, intent: string): strin
 	return [
 		`Self-modify session ${sessionId} is still waiting for approval.`,
 		`Requested change: ${intent.trim()}`,
-		"Reply approve to execute, cancel to abort, or send feedback to revise the plan.",
+		"Reply approve to execute, cancel or /cancelplan to abort, or start your message with feedback: to revise the plan.",
 	].join("\n");
 }
 
